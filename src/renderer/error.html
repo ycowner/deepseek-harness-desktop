@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    />
+    <title>DSH Desktop - 启动失败</title>
+    <style>
+      /* 全局重置 */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        background: #1a1a2e;
+        color: #e0e0e0;
+        font-family: system-ui, -apple-system, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+      }
+
+      .container {
+        max-width: 640px;
+        width: 100%;
+        text-align: center;
+      }
+
+      /* 错误图标（CSS 绘制圆形 + Unicode 字符） */
+      .icon {
+        width: 72px;
+        height: 72px;
+        margin: 0 auto 1rem;
+        border-radius: 50%;
+        background: rgba(231, 76, 60, 0.12);
+        border: 2px solid #e74c3c;
+        color: #e74c3c;
+        font-size: 2.5rem;
+        line-height: 68px;
+        font-weight: bold;
+      }
+
+      .title {
+        font-size: 1.5rem;
+        color: #ffffff;
+        margin-bottom: 1.5rem;
+      }
+
+      /* 错误详情：深色代码块 */
+      .detail {
+        background: #0f0f1e;
+        border: 1px solid #2a2a3e;
+        border-radius: 6px;
+        padding: 1rem;
+        text-align: left;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.85rem;
+        color: #d0d0d0;
+        margin-bottom: 2rem;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 280px;
+        overflow: auto;
+      }
+
+      /* 重试按钮 */
+      .retry-btn {
+        background: #3498db;
+        color: #ffffff;
+        border: none;
+        padding: 0.75rem 2rem;
+        font-size: 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 0.2s ease;
+        margin: 0 0.5rem;
+      }
+
+      .retry-btn:hover {
+        background: #2980b9;
+      }
+
+      .retry-btn:active {
+        background: #2471a3;
+      }
+
+      .retry-btn:disabled {
+        background: #2c3e50;
+        cursor: not-allowed;
+      }
+
+      /* 在线修复按钮（DSH 包损坏时显示） */
+      .repair-btn {
+        background: #27ae60;
+        color: #ffffff;
+        border: none;
+        padding: 0.75rem 2rem;
+        font-size: 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 0.2s ease;
+        margin: 0 0.5rem;
+      }
+
+      .repair-btn:hover {
+        background: #229954;
+      }
+
+      .repair-btn:active {
+        background: #1e8449;
+      }
+
+      .repair-btn:disabled {
+        background: #2c3e50;
+        cursor: not-allowed;
+      }
+
+      /* 按钮容器 */
+      .btn-group {
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+
+      /* 修复进度区域（默认隐藏） */
+      .progress-box {
+        background: #0f0f1e;
+        border: 1px solid #2a2a3e;
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        text-align: left;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.85rem;
+        color: #5dade2;
+        margin-bottom: 1rem;
+        max-height: 160px;
+        overflow: auto;
+        display: none;
+      }
+
+      .progress-box.visible {
+        display: block;
+      }
+
+      .progress-line {
+        line-height: 1.5;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="icon">!</div>
+      <div class="title">启动失败</div>
+      <pre class="detail" id="detail">正在读取错误信息...</pre>
+      <!-- 修复进度区域（默认隐藏，点击"在线修复"后显示） -->
+      <div class="progress-box" id="progress-box"></div>
+      <div class="btn-group">
+        <button class="retry-btn" id="retry" type="button">重试</button>
+        <!-- 在线修复按钮：仅当 DSH 包缺失/损坏时显示 -->
+        <button class="repair-btn" id="repair" type="button" style="display: none">在线修复</button>
+      </div>
+    </div>
+    <script>
+      ;(function () {
+        var detailEl = document.getElementById('detail')
+        var retryBtn = document.getElementById('retry')
+        var repairBtn = document.getElementById('repair')
+        var progressBox = document.getElementById('progress-box')
+
+        // 显示错误信息：优先使用 preload 暴露的 API，否则回退到 URL query
+        function getErrorText() {
+          try {
+            if (window.dsh && typeof window.dsh.getErrorInfo === 'function') {
+              return window.dsh.getErrorInfo() || '未知错误'
+            }
+          } catch (e) {
+            /* 忽略，走回退路径 */
+          }
+          try {
+            var params = new URLSearchParams(window.location.search)
+            return params.get('error') || '未知错误'
+          } catch (e) {
+            return '未知错误'
+          }
+        }
+
+        var errorText = ''
+        try {
+          errorText = getErrorText()
+          detailEl.textContent = errorText
+        } catch (e) {
+          detailEl.textContent = '读取错误信息失败: ' + (e && e.message ? e.message : String(e))
+        }
+
+        // 检测是否为 DSH 包缺失错误，是则显示"在线修复"按钮
+        var isPackageMissing = errorText.indexOf('[CODE:DSH_PACKAGE_MISSING]') !== -1
+        if (isPackageMissing) {
+          repairBtn.style.display = 'inline-block'
+        }
+
+        // 追加一行进度信息到进度区域
+        function appendProgress(msg) {
+          if (!progressBox) return
+          progressBox.classList.add('visible')
+          var line = document.createElement('div')
+          line.className = 'progress-line'
+          line.textContent = msg
+          progressBox.appendChild(line)
+          // 自动滚动到底部
+          progressBox.scrollTop = progressBox.scrollHeight
+        }
+
+        // 重试按钮：调用 preload 暴露的 window.dsh.retry() 通知主进程
+        retryBtn.addEventListener('click', function () {
+          retryBtn.disabled = true
+          retryBtn.textContent = '正在重试...'
+          try {
+            if (window.dsh && typeof window.dsh.retry === 'function') {
+              window.dsh.retry()
+            } else {
+              retryBtn.disabled = false
+              retryBtn.textContent = '重试'
+            }
+          } catch (e) {
+            retryBtn.disabled = false
+            retryBtn.textContent = '重试'
+          }
+        })
+
+        // 在线修复按钮：调用 window.dsh.repairDsh() 触发主进程下载 DSH 包
+        repairBtn.addEventListener('click', async function () {
+          if (!window.dsh || typeof window.dsh.repairDsh !== 'function') {
+            appendProgress('当前环境不支持在线修复，请重新安装应用')
+            return
+          }
+
+          // 禁用按钮，避免重复点击
+          repairBtn.disabled = true
+          retryBtn.disabled = true
+          repairBtn.textContent = '正在修复...'
+          progressBox.innerHTML = ''
+          appendProgress('开始在线修复...')
+
+          // 订阅修复进度
+          try {
+            if (typeof window.dsh.onRepairProgress === 'function') {
+              window.dsh.onRepairProgress(function (msg) {
+                appendProgress(msg)
+              })
+            }
+          } catch (e) {
+            /* 忽略订阅错误 */
+          }
+
+          try {
+            var result = await window.dsh.repairDsh()
+            if (result && result.success) {
+              appendProgress('修复成功！正在重启 DSH 服务...')
+              // 修复成功后自动触发重试，重新加载 DSH
+              setTimeout(function () {
+                if (typeof window.dsh.retry === 'function') {
+                  window.dsh.retry()
+                }
+              }, 1500)
+            } else {
+              appendProgress('修复失败: ' + (result && result.error ? result.error : '未知错误'))
+              // 恢复按钮状态，允许用户重试
+              repairBtn.disabled = false
+              retryBtn.disabled = false
+              repairBtn.textContent = '在线修复'
+            }
+          } catch (e) {
+            appendProgress('修复异常: ' + (e && e.message ? e.message : String(e)))
+            repairBtn.disabled = false
+            retryBtn.disabled = false
+            repairBtn.textContent = '在线修复'
+          }
+        })
+      })()
+    </script>
+  </body>
+</html>

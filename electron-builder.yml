@@ -1,0 +1,58 @@
+appId: com.dsh.desktop
+productName: DSH Desktop
+directories:
+  output: dist-exe
+  buildResources: build
+  app: .
+# 主进程代码打包进 asar，extraResources 中的内容不会被 asar 打包
+asar: true
+# 压缩策略：本地分发优先解压速度，normal 平衡体积与解压速度
+compression: normal
+files:
+  - "dist/**/*"
+  - "package.json"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # 应用以管理员权限运行（解决 DSH 创建符号链接的 EPERM 问题）
+  requestedExecutionLevel: requireAdministrator
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: true
+# 额外资源：将内置 Node.js 二进制和预安装的 DSH 包打包到应用中
+extraResources:
+  # Node.js 二进制（仅 node.exe，不打包 npm/node_modules 以减小安装包体积）
+  # dsh-bundled 已预装 DSH 包，运行时直接使用；损坏时通过 dsh-repair 在线恢复
+  - from: "resources/node"
+    to: "node"
+    filter:
+      - "**/*"
+      # 排除运行时产生的缓存
+      - "!**/.npm-cache/**"
+      # 关键：排除 npm/corepack 整个 node_modules，减少 12MB 和约 2300 个小文件
+      # dsh-bundled 已预装 DSH 包，运行时无需 npx
+      - "!**/node_modules/**"
+      # 排除文档、类型声明、示例等无用文件
+      - "!**/dist-types/**"
+      - "!**/*.d.ts"
+      - "!**/*.d.cts"
+      - "!**/*.d.mts"
+      - "!**/*.md"
+      - "!**/*.markdown"
+      - "!**/docs/**"
+      - "!**/man/**"
+  # 预安装的 DSH 包（独立目录，避免 node_modules 被 electron-builder 排除）
+  - from: "resources/dsh-bundled"
+    to: "dsh-bundled"
+    filter:
+      - "**/*"
+      - "!**/dist-types/**"
+      - "!**/*.d.ts"
+      - "!**/*.d.cts"
+      - "!**/*.d.mts"
+  # 窗口图标：打包到 resources/icon.ico，供主进程在运行时读取
+  - from: "build/icon.ico"
+    to: "icon.ico"

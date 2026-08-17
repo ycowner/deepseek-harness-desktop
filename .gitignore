@@ -1,0 +1,38 @@
+# 依赖目录
+node_modules/
+
+# 构建输出
+dist/
+out/
+dist-electron/
+.eb-cache/
+
+# 历史构建产物 (按 AGENTS.md §12.1.10,这些目录不应入库)
+dist-exe/
+dist-exe-archives/
+dist-exe-*/
+dist-msi/
+dist-msi-*/
+dist-release/
+msi/
+
+# 内置 Node.js 二进制（构建时通过 scripts/download-node.js 下载）
+resources/node/
+# 预安装的 DSH 包（构建时通过 scripts/preinstall-dsh.js 下载）
+resources/dsh-bundled/
+
+# TypeScript 增量编译缓存
+*.tsbuildinfo
+
+# electron-vite 运行时生成的临时配置
+electron.vite.config.*.mjs
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# IDE 配置
+.idea/
+.vscode/

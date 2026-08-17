@@ -1,0 +1,34 @@
+{
+  "name": "dsh-web-desktop",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness Web 桌面客户端",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "package": "electron-vite build && electron-builder && node scripts/archive-dist-exe.js",
+    "postinstall": "node scripts/download-node.js",
+    "prepackage": "node scripts/download-node.js && node scripts/preinstall-dsh.js",
+    "download-node": "node scripts/download-node.js",
+    "preinstall-dsh": "node scripts/preinstall-dsh.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-vite": "^2.3.0",
+    "electron-builder": "^25.0.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "@types/node": "^22.0.0"
+  },
+  "author": "零物实验室 (Lingwu Lab)",
+  "license": "MIT",
+  "homepage": "https://github.com/ycowner/deepseek-harness-desktop#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ycowner/deepseek-harness-desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ycowner/deepseek-harness-desktop/issues"
+  }
+}
