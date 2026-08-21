@@ -17,14 +17,15 @@ export const DSH_PACKAGE_MISSING_ERROR_NAME = 'DSH_PACKAGE_MISSING'
  * 查找已缓存的 DSH 包入口路径
  *
  * 检查位置（按优先级）：
- * 1. 打包时预安装的独立目录（resources/dsh-bundled/，只读，不受 node_modules 排除影响）
- * 2. 在线修复缓存目录（%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/，可写，由 dsh-repair 下载）
+ * 1. 在线修复/更新缓存目录（%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/，可写，由 dsh-repair 下载）
+ *    —— 用户显式修复/更新后的版本优先于出厂预装版本，否则更新永远不生效
+ * 2. 打包时预安装的独立目录（resources/dsh-bundled/，只读，不受 node_modules 排除影响）
  * 3. npx 缓存中的打包预安装位置（resources/node/.npm-cache/_npx/，只读，仅开发环境有）
  * 4. 用户运行时 npx 缓存（%LOCALAPPDATA%/DSH Desktop/npm-cache/_npx/，可写）
  *
  * @returns dsh bin 入口脚本的绝对路径，未找到则返回 null
  */
-function findCachedDshEntry(): string | null {
+export function findCachedDshEntry(): string | null {
   // 通用：从指定目录读取 DSH 包的 bin 入口
   const resolveDshBin = (dshDir: string): string | null => {
     const pkgJsonPath = join(dshDir, 'package.json')
@@ -42,28 +43,61 @@ function findCachedDshEntry(): string | null {
         return join(dshDir, binPath)
       }
     } catch {
-      // 忽略解析错误
-    }
-    return null
+    // 忽略解析错误
   }
+  return null
+}
 
-  // 1. 优先检查独立预安装目录（dsh-bundled）
-  const bundledDir = join(getNodeDir(), '..', 'dsh-bundled')
-  if (existsSync(bundledDir)) {
-    const entry = resolveDshBin(bundledDir)
-    if (entry) {
-      console.log('[DSH] 在打包预安装目录 (dsh-bundled) 中找到 DSH 包')
-      return entry
+/**
+ * 校验 DSH 包是否依赖完整（可运行）
+ *
+ * 从 npm 下载解压的包（如 dsh-repair 产物）默认不含 node_modules，
+ * 缺少依赖会导致启动时 ERR_MODULE_NOT_FOUND。此处通过检查 package.json
+ * 是否声明了 dependencies、且对应 node_modules 目录是否存在来判断。
+ *
+ * @param dshDir DSH 包目录
+ * @returns 依赖完整返回 true；无声明依赖或依赖已安装返回 true
+ */
+function isPkgDepsComplete(dshDir: string): boolean {
+  const pkgJsonPath = join(dshDir, 'package.json')
+  if (!existsSync(pkgJsonPath)) return true
+  try {
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'))
+    const deps = pkg.dependencies
+    // 无 dependencies 声明则无需校验
+    if (!deps || typeof deps !== 'object' || Object.keys(deps).length === 0) {
+      return true
     }
+    return existsSync(join(dshDir, 'node_modules'))
+  } catch {
+    // 解析失败视为完整（交给后续启动流程暴露真实错误）
+    return true
   }
+}
 
-  // 2. 检查在线修复缓存目录（由 dsh-repair 下载，dsh-bundled 损坏时使用）
+  // 1. 优先检查在线修复/更新缓存目录（由 dsh-repair 下载，用户显式更新的版本应优先于出厂预装）
   const repairCacheDir = join(getDshRepairCacheDir(), 'dsh')
   if (existsSync(repairCacheDir)) {
     const entry = resolveDshBin(repairCacheDir)
-    if (entry) {
+    if (entry && isPkgDepsComplete(repairCacheDir)) {
       console.log('[DSH] 在在线修复缓存目录中找到 DSH 包')
       return entry
+    }
+    if (entry) {
+      console.warn('[DSH] 在线修复缓存 DSH 包依赖不完整，跳过并回退到内置版本')
+    }
+  }
+
+  // 2. 回退到打包预安装目录（dsh-bundled，出厂版本；缓存不存在或无效时使用）
+  const bundledDir = join(getNodeDir(), '..', 'dsh-bundled')
+  if (existsSync(bundledDir)) {
+    const entry = resolveDshBin(bundledDir)
+    if (entry && isPkgDepsComplete(bundledDir)) {
+      console.log('[DSH] 在打包预安装目录 (dsh-bundled) 中找到 DSH 包')
+      return entry
+    }
+    if (entry) {
+      console.warn('[DSH] 内置 dsh-bundled DSH 包依赖不完整，继续查找其他候选')
     }
   }
 
@@ -366,7 +400,8 @@ export function startDsh(): Promise<DshProcess> {
     console.log(`[DSH] 找到已缓存的 DSH 包，直接运行: ${cachedDshEntry}`)
     // 通过 --port 命令行参数显式传递端口（DSH README 文档支持）
     // 之前仅通过 PORT 环境变量传递，但 DSH 实际未读取该变量，仍监听默认 3080
-    const spawnArgs: string[] = [cachedDshEntry, 'web', '--port', String(desiredPort)]
+    // --no-open 禁止 DSH web 自动打开系统默认浏览器，只让桌面客户端加载 UI
+    const spawnArgs: string[] = [cachedDshEntry, 'web', '--port', String(desiredPort), '--no-open']
 
     let child: ChildProcess
     try {

@@ -1,7 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const SRC = path.resolve(__dirname, '..', 'dist-exe');
+// 只归档本次生成的版本子目录（dist-exe/<version>），避免把 dist-exe 下所有累积版本都重复复制
+const pkg = require('../package.json');
+const SRC = path.resolve(__dirname, '..', 'dist-exe', pkg.version);
 const ROOT = path.resolve(__dirname, '..', 'dist-exe-archives');
 
 function pad(n) { return n.toString().padStart(2, '0'); }

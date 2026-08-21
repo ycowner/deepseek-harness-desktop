@@ -1,0 +1,25 @@
+# Checklist
+
+- [x] `dsh-version.ts` 的 `compareVersions` 已导出，`app-update.ts` 从中导入复用，未重复实现版本比较
+- [x] `src/main/app-update.ts` 已创建，实现 GitHub 优先、Gitee 回退的双源版本检测
+- [x] `checkForAppUpdate()` 正确解析 release 的 `tag_name` 与 `DSH-Desktop-Setup-{version}.exe` 资产（空格归一化为连字符的宽松匹配），返回下载 URL 与来源
+- [x] 版本比对逻辑正确（当前 < 最新才判定有更新），预发布版本处理与既有 `compareVersions` 行为一致
+- [x] `getInstallDir()` 返回 `path.dirname(app.getPath('exe'))`（打包后为安装目录）
+- [x] `downloadAppUpdate()` 流式下载安装包到安装目录、跟随重定向、上报进度；目标文件已存在时跳过下载
+- [x] 双源均失败时 `checkForAppUpdate()` 返回 error 且不抛异常，调用方静默处理
+- [x] `src/preload/index.ts` 暴露 `getAppVersion()` 与 `installUpdate()`，与既有 API 并存
+- [x] 主进程注册 `get-app-version`（invoke）与 `install-update`（send）两个 IPC 通道
+- [x] 窗口标题在 DSH 就绪后显示 `DSH Desktop v{应用版本} - DSH v{dsh版本}`
+- [x] DSH 就绪后异步触发桌面应用版本检查，不阻塞用户操作
+- [x] 检测到新版本时后台自动下载安装包到安装目录，不打扰用户
+- [x] 下载完成后通过 `executeJavaScript` 向 DSH UI 注入右上角「应用 vX · 有更新」悬浮角标
+- [x] 角标点击事件用 `addEventListener` 绑定，调用 `window.dsh.installUpdate()`，且带防重复注入标记
+- [x] 点击角标弹出「立即更新 / 稍后更新」原生对话框，显示当前与最新版本
+- [x] 「稍后更新」仅关闭对话框，不执行安装动作
+- [x] 「立即更新」流程：校验安装包存在 → 停止 DSH → 打开安装向导（非静默）→ 退出应用；安装包缺失时弹错误提示且不退出
+- [x] loading.html 底部显示「应用版本: v{版本号}」，获取失败显示「应用版本: 未知」
+- [x] 开发模式（`app.isPackaged === false`）跳过桌面应用更新检查与安装流程
+- [x] 未修改 `DSH_PACKAGE_MISSING_ERROR_NAME` 字符串常量
+- [x] 未修改 `requestedExecutionLevel: requireAdministrator` 权限设置
+- [x] 未改动既有 dsh 上游更新逻辑（`check-update` / `get-installed-version` / repair 流程）
+- [x] `npm run build` TypeScript 编译通过

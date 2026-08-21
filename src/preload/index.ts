@@ -35,6 +35,27 @@ const api = {
   // 订阅修复进度消息（在 repairDsh 调用期间通过 onRepairProgress 上报步骤文字）
   onRepairProgress: (callback: (msg: string) => void): void => {
     ipcRenderer.on('repair-progress', (_event, msg: string) => callback(msg))
+  },
+  // 触发版本检查（主进程比较本地与 npm registry 最新版本）
+  checkUpdate: (): Promise<{ hasUpdate: boolean; currentVersion: string; latestVersion: string; error?: string }> => {
+    return ipcRenderer.invoke('check-update')
+  },
+  // 获取已安装的 DSH 版本号
+  getInstalledVersion: (): Promise<string> => {
+    return ipcRenderer.invoke('get-installed-version')
+  },
+  // 获取桌面应用自身的版本号
+  getAppVersion: (): Promise<string> => {
+    return ipcRenderer.invoke('get-app-version')
+  },
+  // 触发桌面应用安装更新（主进程弹出确认框后执行安装）
+  installUpdate: (): void => {
+    ipcRenderer.send('install-update')
+  },
+  // 在系统默认浏览器中打开外部链接（DSH UI 中的 GitHub 图标使用）
+  // 返回 openExternal 结果：成功时 success 为 true，失败时包含 error 信息
+  openExternal: (url: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('open-external', url)
   }
 }
 

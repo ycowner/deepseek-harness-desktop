@@ -1,7 +1,10 @@
 appId: com.dsh.desktop
 productName: DSH Desktop
+# 安装包产物命名（连字符格式，与 app-update.ts 的检测模板保持一致，避免上传平台对空格的处理）
+artifactName: DSH-Desktop-Setup-${version}.${ext}
 directories:
-  output: dist-exe
+  # 每个版本在 dist-exe 下拥有独立子目录（如 dist-exe/1.0.1/），避免版本间相互覆盖
+  output: dist-exe/${version}
   buildResources: build
   app: .
 # 主进程代码打包进 asar，extraResources 中的内容不会被 asar 打包
@@ -24,17 +27,17 @@ nsis:
   perMachine: true
 # 额外资源：将内置 Node.js 二进制和预安装的 DSH 包打包到应用中
 extraResources:
-  # Node.js 二进制（仅 node.exe，不打包 npm/node_modules 以减小安装包体积）
-  # dsh-bundled 已预装 DSH 包，运行时直接使用；损坏时通过 dsh-repair 在线恢复
+  # Node.js 二进制 + 内置 npm（npm 用于 dsh 在线更新时给下载的包补装依赖）
+  # dsh-bundled 已预装 DSH 包，运行时直接使用；损坏/更新时通过 dsh-repair 在线恢复
   - from: "resources/node"
     to: "node"
     filter:
       - "**/*"
       # 排除运行时产生的缓存
       - "!**/.npm-cache/**"
-      # 关键：排除 npm/corepack 整个 node_modules，减少 12MB 和约 2300 个小文件
-      # dsh-bundled 已预装 DSH 包，运行时无需 npx
-      - "!**/node_modules/**"
+      # 仅排除 corepack，保留 npm（node_modules/npm 用于 dsh 在线更新时补装依赖）
+      # 说明：npm 体积约 +11MB，但其所有依赖已 bundle 在 npm/node_modules 内，不依赖其他 node_modules
+      - "!**/node_modules/corepack/**"
       # 排除文档、类型声明、示例等无用文件
       - "!**/dist-types/**"
       - "!**/*.d.ts"

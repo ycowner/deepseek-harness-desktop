@@ -104,7 +104,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 - 日常开发：`npm install`（自动下载 Node）→ `npm run dev`
 - 改完代码验证：`npm run build`（不打包，纯编译检查）
-- 发版：`npm run package`（产物在 `dist-exe/`，归档在 `dist-exe-archives/<时间戳>/`）
+- 发版：`npm run package`（产物在 `dist-exe/<版本号>/`，归档在 `dist-exe-archives/<时间戳>/`）
 
 ---
 
@@ -186,12 +186,12 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 - 版本：**v22.19.0 Windows x64**（写在 `scripts/download-node.js` 顶部 `NODE_VERSION`）。
 - 下载源：先 `https://npmmirror.com/mirrors/node/...` 国内镜像，失败回退 `https://nodejs.org/dist/...`。
 - 解压用 PowerShell 的 `Expand-Archive`。
-- **打包后**只保留 `node.exe` + 必要的 `node_modules/npm`（`extraResources` 配置显式排除了 npm/corepack 的 `node_modules/**`、`dist-types/**`、`.d.ts`、`.md`、`docs/`、`man/`，详见 `electron-builder.yml`）。
+- **打包后**保留 `node.exe` + **完整内置 npm**（`node_modules/npm`，含其 bundle 的全部依赖，体积约 +11MB）。npm 用于 **dsh 在线更新时给下载的包补装运行时依赖**（dsh-repair 的 `installPackageDependencies`）。`extraResources` 仅排除 corepack、`dist-types/**`、`.d.ts`、`.md`、`docs/`、`man/`，详见 `electron-builder.yml`。
 
 ### 6.2 DSH 包查找优先级（`dsh-manager.ts` 的 `findCachedDshEntry()`）
 
-1. **`resources/dsh-bundled/`**（打包时预装的独立目录）—— **首选**
-2. **`%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/`**（在线修复下载的缓存）
+1. **`%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/`**（在线修复/更新下载的缓存）—— **首选**，用户显式更新的版本应优先于出厂预装，否则更新永远不生效
+2. **`resources/dsh-bundled/`**（打包时预装的独立目录，出厂版本；缓存不存在或无效时回退到此）
 3. **`resources/node/.npm-cache/_npx/`**（打包预装的 npx 缓存，仅开发环境）
 4. **`%LOCALAPPDATA%/DSH Desktop/npm-cache/_npx/`**（用户运行时 npx 缓存）
 
@@ -236,15 +236,16 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 ## 8. 打包（electron-builder）
 
-- 输出目录：`dist-exe/`
-- 归档目录：`dist-exe-archives/<YYYYMMDD_HHMMSS>/`（`scripts/archive-dist-exe.js`）
+- 输出目录：`dist-exe/<version>/`（`electron-builder.yml` 中 `output: dist-exe/${version}` 按版本号展开，每版本独立子目录互不覆盖）
+- 归档目录：`dist-exe-archives/<YYYYMMDD_HHMMSS>/`（`scripts/archive-dist-exe.js` 仅归档本次版本子目录）
 - 主进程代码 → `dist/` → 打包进 `asar`
 - 运行时资源 → `extraResources`：
-  - `node/`（内置 Node，已排除 npm 的 node_modules / 文档 / 类型声明）
+  - `node/`（内置 Node + 完整 npm；已排除 corepack / 文档 / 类型声明）
   - `dsh-bundled/`（预装 DSH 包，已排除 d.ts）
   - `icon.ico`（窗口图标，主进程通过 `process.resourcesPath/icon.ico` 读取）
 - 安装包：NSIS、`perMachine: true`、`oneClick: false`、`allowToChangeInstallationDirectory: true`
-- 体积优化关键：`extraResources` 的 `filter` 排除项减少了约 12MB 和 2300+ 小文件（详见 `electron-builder.yml` 注释）
+- 安装包命名：`DSH-Desktop-Setup-<version>.exe`（`artifactName` 连字符格式，与 `src/main/app-update.ts` 的检测模板一致；检测逻辑会宽松归一化空格为连字符，兼容空格命名）
+- 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 146MB。
 
 **修改打包配置后必须验证**：
 

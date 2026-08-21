@@ -1,0 +1,18 @@
+- [x] `dsh-version.ts` 模块已创建,导出 `getInstalledDshVersion()`、`fetchLatestVersion()`、`checkForUpdate()` 三个函数
+- [x] `dsh-repair.ts` 中的 `fetchLatestVersion()` 已改为从 `dsh-version.ts` 导入,不再重复定义
+- [x] `dsh-manager.ts` 中的 DSH 包路径解析逻辑可被 `dsh-version.ts` 复用读取版本号
+- [x] `src/preload/index.ts` 暴露了 `checkUpdate()` 和 `getInstalledVersion()` 两个新方法
+- [x] 主进程注册了 `check-update` 和 `get-installed-version` 两个 IPC 通道
+- [x] DSH Web UI 加载完成后自动触发版本检查,不阻塞用户操作
+- [x] 检测到新版本时弹出原生对话框,显示当前版本和最新版本
+- [x] 对话框提供"立即更新"和"稍后"两个按钮
+- [x] 用户点击"立即更新"后,复用 `repairDsh()` 下载最新版,完成后重启 DSH 进程并重新加载 UI
+- [x] 更新失败时弹出错误提示,当前版本继续运行不受影响
+- [x] 网络检查失败时静默忽略,不影响应用正常使用
+- [x] 窗口标题栏在 DSH 就绪后显示 `DSH Desktop - v{版本号}`
+- [x] loading.html 底部显示当前安装的 DSH 版本号
+- [x] 获取版本号失败时显示"当前版本: 未知"
+- [x] `npm run build` TypeScript 编译通过
+- [x] 未修改 `DSH_PACKAGE_MISSING_ERROR_NAME` 字符串常量
+- [x] 未修改 `requestedExecutionLevel: requireAdministrator` 权限设置
+- [x] 版本检查不影响现有启动流程、端口管理、进程终止逻辑
