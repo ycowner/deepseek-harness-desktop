@@ -48,9 +48,13 @@ const api = {
   getAppVersion: (): Promise<string> => {
     return ipcRenderer.invoke('get-app-version')
   },
-  // 触发桌面应用安装更新（主进程弹出确认框后执行安装）
+  // 触发客户端更新引导（主进程弹出确认框后打开 GitHub Release 页面，由用户手动下载安装）
   installUpdate: (): void => {
     ipcRenderer.send('install-update')
+  },
+  // 触发 DSH 运行包更新（主进程切回 loading 页后下载安装并重启服务）
+  installDshUpdate: (): void => {
+    ipcRenderer.send('install-dsh-update')
   },
   // 在系统默认浏览器中打开外部链接（DSH UI 中的 GitHub 图标使用）
   // 返回 openExternal 结果：成功时 success 为 true，失败时包含 error 信息

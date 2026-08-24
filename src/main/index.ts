@@ -1,11 +1,9 @@
 import { app, BrowserWindow, shell, ipcMain, nativeImage, dialog } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
-import { spawn } from 'child_process'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
-import { repairDsh } from './dsh-repair'
-import { checkForUpdate, getInstalledDshVersion } from './dsh-version'
-import { checkForAppUpdate, getDownloadedAppPath, getInstallDir, downloadAppUpdate, getInstalledAppVersion } from './app-update'
+import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
+import { checkForUpdate, getInstalledDshVersion, isValidVersion } from './dsh-version'
+import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers } from './app-update'
 
 // 主窗口引用
 let mainWindow: BrowserWindow | null = null
@@ -13,10 +11,20 @@ let mainWindow: BrowserWindow | null = null
 // 标记是否正在执行启动流程（防止重试重复触发）
 let isStarting = false
 
-// 待安装的桌面应用版本号（由 checkAndDownloadAppUpdate 赋值，install-update IPC 与 performAppUpdate 读取）
-let pendingAppUpdateVersion: string | null = null
+// DSH 运行包更新互斥锁（performUpdate 与 install-dsh-update 入口检查）
+let isUpdating = false
 
-// 最近一次已提示过更新的 DSH 最新版本（用于抑制同一版本的重复弹窗）
+// DSH 修复互斥锁（repair-dsh IPC 重入保护）
+let isRepairing = false
+
+// 待更新的桌面应用版本号与 GitHub Release 页面地址（由 checkForGitHubAppUpdateAndPrompt 赋值，install-update IPC 读取）
+let pendingAppUpdateVersion: string | null = null
+let pendingAppUpdateReleaseUrl: string | null = null
+
+// 待安装的 DSH 运行包版本号（由 checkDshUpdateAndPrompt 赋值，install-dsh-update IPC 与 performUpdate 读取）
+let pendingDshUpdateVersion: string | null = null
+
+// 最近一次已提示过更新的 DSH 最新版本（用于抑制同一版本的重复弹窗/横幅）
 let lastPromptedDshVersion: string | null = null
 
 // GitHub 仓库地址（右上角图标点击后在系统默认浏览器打开）
@@ -91,6 +99,42 @@ function getWindowIconPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, 'icon.ico')
     : join(__dirname, '../../build/icon.ico')
+}
+
+/**
+ * 校验 IPC 调用方来源是否可信
+ *
+ * 仅允许本地 file:// 协议（loading/error 页）或 loopback http(s)（DSH 页面），
+ * 防止外部页面或被劫持的 webContents 触发高危通道（更新/修复/外链打开）。
+ */
+function isTrustedSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
+  try {
+    const url = new URL(event.senderFrame.url)
+    if (url.protocol === 'file:') return true
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 判断主窗口当前是否加载着 DSH Web UI（loopback 页面）
+ *
+ * 横幅/图标仅在 DSH 页面注入，避免污染 loading/error 页（这些页面结构简单，
+ * 注入 banner 可能造成 UI 错位）；也避免在 DSH UI 尚未加载时执行 JS 抛错。
+ */
+function isDshPageLoaded(): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  try {
+    const url = new URL(mainWindow.webContents.getURL())
+    return (url.protocol === 'http:' || url.protocol === 'https:') &&
+      (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1')
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -182,8 +226,8 @@ async function startDshAndLoad(): Promise<void> {
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
       // 异步检查更新（不阻塞启动流程）
       checkDshUpdateAndPrompt()
-      // 异步检查并下载桌面应用自身更新（不阻塞启动流程）
-      void checkAndDownloadAppUpdate()
+      // 异步检查桌面应用自身更新（不阻塞启动流程；有新版时引导打开 GitHub Release 页面）
+      void checkForGitHubAppUpdateAndPrompt()
       // 向 DSH UI 注入 GitHub 仓库链接图标（不阻塞启动流程）
       void injectGitHubLink()
     }
@@ -197,38 +241,17 @@ async function startDshAndLoad(): Promise<void> {
 }
 
 /**
- * 显示更新提醒对话框
- *
- * 当检测到 DSH 有新版本时，弹出对话框询问用户是否立即更新。
- * 用户选择"立即更新"后触发 performUpdate 流程。
- */
-async function showUpdateDialog(currentVersion: string, latestVersion: string): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  const result = await dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    title: '发现新版本',
-    message: `DSH 有新版本可用`,
-    detail: `当前版本: v${currentVersion}\n最新版本: v${latestVersion}\n\n是否立即更新?`,
-    buttons: ['立即更新', '稍后'],
-    defaultId: 0,
-    cancelId: 1
-  })
-  if (result.response === 0) {
-    await performUpdate()
-  }
-}
-
-/**
- * 检查 DSH 是否有新版本，有则弹出更新提醒
+ * 检查 DSH 是否有新版本，有则在 DSH UI 顶部注入蓝色更新横幅
  *
  * 供启动时与定时轮询复用；对同一最新版本只提示一次（lastPromptedDshVersion），
- * 避免更新下载/轮询导致的重复弹窗；检查失败仅记录日志，不打断用户操作。
+ * 避免更新轮询导致的重复横幅；检查失败仅记录日志，不打断用户操作。
  */
 function checkDshUpdateAndPrompt(): void {
   void checkForUpdate().then(result => {
     if (result.hasUpdate && result.latestVersion !== lastPromptedDshVersion) {
       lastPromptedDshVersion = result.latestVersion
-      void showUpdateDialog(result.currentVersion, result.latestVersion)
+      pendingDshUpdateVersion = result.latestVersion
+      void injectDshUpdateBanner()
     }
   }).catch(err => {
     console.error(`[DSH] 版本检查失败: ${err.message}`)
@@ -251,27 +274,34 @@ function startPeriodicDshUpdateCheck(): void {
 /**
  * 执行 DSH 更新流程
  *
- * 复用 repairDsh 下载最新版本，然后重启 DSH 服务。
- * 更新完成后重新检查版本（处理下载版本仍非最新的边缘情况）。
+ * 两阶段：先 prepare（下载+校验+安装到 staging，旧 DSH 继续运行），
+ * 再 stopDsh → activate（rm + rename，毫秒级不可用窗口），最后 startDsh。
+ * 全程受 isUpdating 互斥保护，防止并发触发与临时目录互踩。
+ *
+ * 更新成功后同时复位 pendingDshUpdateVersion 与 lastPromptedDshVersion，
+ * 避免镜像滞后场景下用户被同一版本永久抑制（详见方案报告 #20）。
  */
 async function performUpdate(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  if (isUpdating) {
+    console.warn('[DSH] DSH 更新已在进行中，忽略重复触发')
+    return
+  }
+  isUpdating = true
   try {
     // 显示加载页面
     loadLoadingPage()
     sendStatus('正在下载最新版本 DSH 包...')
 
-    // 复用修复流程下载最新版
-    await repairDsh((msg: string) => {
-      sendStatus(msg)
-    })
+    // 阶段一：下载+校验+安装到 staging（旧 DSH 不受影响，继续对外服务）
+    const prepared = await prepareDshPackage((msg: string) => sendStatus(msg))
+
+    // 阶段二：先停后换（Windows 下 native 模块会锁定缓存目录，必须先停进程）
+    sendStatus('下载完成，正在切换 DSH 版本...')
+    await stopDsh()
+    activateDshPackage(prepared.stagingDir)
 
     sendStatus('更新完成，正在重启 DSH 服务...')
-
-    // 停止旧进程
-    await stopDsh()
-
-    // 重新启动
     const dshProcess = await startDsh()
     sendStatus(`服务已启动，正在等待就绪 (${dshProcess.url})...`)
 
@@ -290,139 +320,169 @@ async function performUpdate(): Promise<void> {
       void injectGitHubLink()
     }
 
-    // 更新完成后再次检查版本（走带抑制逻辑的检查，避免同一版本重复弹窗）
+    // DSH 运行包已更新，清除待安装标记并复位抑制计数（避免镜像滞后时该版本永不再提示）
+    pendingDshUpdateVersion = null
+    lastPromptedDshVersion = null
+
+    // 更新完成后再次检查版本（走带抑制逻辑的检查，避免同一版本重复横幅）
     checkDshUpdateAndPrompt()
   } catch (err) {
     const error = err as Error
     console.error(`[DSH] 更新失败: ${error.message}`)
     dialog.showErrorBox('更新失败', `DSH 更新失败: ${error.message}`)
     loadErrorPage(error.message)
+  } finally {
+    isUpdating = false
   }
 }
 
 /**
- * 检查并下载桌面应用自身的新版本
+ * 检查 GitHub 是否有桌面客户端新版本，有则注入更新横幅
  *
- * 仅在打包环境下执行；检测到新版本后下载安装包到安装目录，
- * 下载完成后注入更新徽标。任何异常仅记录日志，不打断启动流程。
+ * 检测到新版本后不再自动下载安装（自 1.0.3 起移除 electron-updater 与 Gitee 回退源），
+ * 而是记录版本号与 Release 页面地址，由用户点击横幅后引导打开 GitHub Release 页面手动下载。
+ * 全程仅在打包环境下执行；任何异常仅记录日志，不打断启动流程。
  */
-async function checkAndDownloadAppUpdate(): Promise<void> {
+async function checkForGitHubAppUpdateAndPrompt(): Promise<void> {
   if (!app.isPackaged) return
   try {
-    const result = await checkForAppUpdate()
-    if (!result.hasUpdate) return
-
-    const destPath = getDownloadedAppPath(result.latestVersion)
-    // 目标安装包已存在则跳过下载（可能是上次已下载完成）
-    if (!existsSync(destPath)) {
-      console.log(`[DSH] 开始下载桌面应用新版本 v${result.latestVersion} (来源: ${result.source})`)
-      await downloadAppUpdate(result.downloadUrl, destPath, (downloaded) => {
-        // 每下载约 1MB 上报一次进度
-        if (downloaded % (1024 * 1024) < 100 * 1024) {
-          console.log(`[DSH] 下载进度: ${(downloaded / 1024 / 1024).toFixed(1)} MB`)
-        }
-      })
-      console.log(`[DSH] 桌面应用新版本下载完成: ${destPath}`)
-    } else {
-      console.log(`[DSH] 桌面应用新版本安装包已存在，跳过下载: ${destPath}`)
+    const info = await checkForGitHubAppUpdate()
+    if (!info) {
+      console.log('[DSH] 客户端版本检查：已是最新版本')
+      return
     }
-
-    pendingAppUpdateVersion = result.latestVersion
-    await injectUpdateBadge()
+    pendingAppUpdateVersion = info.version
+    pendingAppUpdateReleaseUrl = info.releaseUrl
+    await injectAppUpdateBanner()
   } catch (err) {
-    console.error(`[DSH] 桌面应用更新检查失败: ${(err as Error).message}`)
+    console.error(`[DSH] 客户端版本检查失败: ${(err as Error).message}`)
   }
 }
 
 /**
- * 向 DSH UI 注入右上角"更新"悬浮按钮
+ * 向 DSH UI 顶部注入 DSH 运行包更新横幅
  *
- * 深灰半透明胶囊按钮：左侧为涟漪扩散动画的下载图标，右侧为"更新"文字；
- * 悬停时展开显示详情（有更新 v{最新版本} · 点击更新）；
- * 点击后调用 window.dsh.installUpdate 触发安装确认流程。
- * 样式通过 CSSOM 内联设置、动效使用 Web Animations API，规避外部页面 CSP 限制。
- * 注入前先判断按钮是否已存在，避免重复注入。
+ * 蓝色横幅，明确文案「DSH 运行包有更新 v当前 → v最新」。
+ * 点击「更新 DSH」调用 window.dsh.installDshUpdate 触发 performUpdate。
+ * 关闭按钮仅隐藏横幅，不影响定时轮询的抑制状态。
  */
-async function injectUpdateBadge(): Promise<void> {
+async function injectDshUpdateBanner(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return
-  const latestVersion = pendingAppUpdateVersion || '新版本'
-  const badgeCode = `
+  if (!pendingDshUpdateVersion) return
+  if (!isDshPageLoaded()) return
+  // 防御性白名单：远端版本号未通过校验则放弃注入
+  if (!isValidVersion(pendingDshUpdateVersion)) {
+    console.warn(`[DSH] 最新版本号格式非法，放弃注入 DSH 更新横幅: ${pendingDshUpdateVersion}`)
+    return
+  }
+  const currentVersion = getInstalledDshVersion()
+  const latestVersion = pendingDshUpdateVersion
+  const bannerCode = `
     (function () {
-      if (document.querySelector('[data-dsh-update-badge]')) {
-        return
+      var container = document.querySelector('[data-dsh-update-banners]')
+      if (!container) {
+        container = document.createElement('div')
+        container.setAttribute('data-dsh-update-banners', '')
+        container.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;'
+        document.body.appendChild(container)
       }
-      // 构建按钮主体（放在 GitHub 图标左侧同一行，紧贴标题栏下方）
-      var badge = document.createElement('div')
-      badge.setAttribute('data-dsh-update-badge', '')
-      badge.style.cssText = 'position:fixed;top:16px;right:64px;z-index:2147483647;display:inline-flex;align-items:center;gap:8px;padding:6px 14px 6px 10px;background:rgba(40,44,52,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.12);border-radius:999px;color:#fff;font-size:13px;font-weight:600;font-family:system-ui,-apple-system,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25);transition:background .2s ease,box-shadow .2s ease;overflow:hidden;white-space:nowrap;'
+      var existing = container.querySelector('[data-dsh-update-banner="dsh"]')
+      if (existing) existing.remove()
 
-      // 涟漪动画下载图标（下载箭头 + 向外扩散并淡出的圆环）
-      var icon = document.createElement('span')
-      icon.style.cssText = 'position:relative;width:18px;height:18px;flex:0 0 auto;'
-      icon.innerHTML = '<svg class="dsh-arrow" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M6 13l6 6 6-6"/></svg>'
-      var arrow = icon.querySelector('.dsh-arrow')
-      arrow.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);'
-      badge.appendChild(icon)
+      var banner = document.createElement('div')
+      banner.setAttribute('data-dsh-update-banner', 'dsh')
+      banner.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 16px;background:#2563eb;color:#fff;font-size:13px;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,.25);'
+      banner.innerHTML = '<span>DSH 运行包有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:#fff;color:#2563eb;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">更新 DSH</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
 
-      // 涟漪动画：每 0.6s 新增一个向外扩散并淡出的圆环（Web Animations API，不依赖 @keyframes）
-      function spawnRipple(el) {
-        if (!document.body.contains(el)) {
-          return
+      banner.querySelector('[data-action="update"]').addEventListener('click', function () {
+        if (window.dsh && typeof window.dsh.installDshUpdate === 'function') {
+          window.dsh.installDshUpdate()
         }
-        var ring = document.createElement('span')
-        ring.style.cssText = 'position:absolute;inset:0;border-radius:50%;border:1.5px solid rgba(255,255,255,.55);pointer-events:none;'
-        el.appendChild(ring)
-        var anim = ring.animate(
-          [{ transform: 'scale(0.6)', opacity: 0.9 }, { transform: 'scale(2.2)', opacity: 0 }],
-          { duration: 1800, easing: 'ease-out' }
-        )
-        anim.onfinish = function () {
-          ring.remove()
-        }
-        setTimeout(function () {
-          spawnRipple(el)
-        }, 600)
-      }
-      spawnRipple(icon)
-
-      // "更新"文字
-      var label = document.createElement('span')
-      label.style.cssText = 'line-height:1;'
-      label.textContent = '更新'
-      badge.appendChild(label)
-
-      // 悬停详情
-      var detail = document.createElement('span')
-      detail.style.cssText = 'max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width .25s ease,opacity .2s ease,margin-left .25s ease;font-weight:400;color:rgba(255,255,255,.85);font-size:12px;'
-      detail.textContent = '有更新 v${latestVersion} · 点击更新'
-      badge.appendChild(detail)
-
-      // 悬停交互
-      badge.addEventListener('mouseenter', function () {
-        badge.style.background = 'rgba(52,58,68,.85)'
-        badge.style.boxShadow = '0 4px 14px rgba(0,0,0,.35)'
-        detail.style.maxWidth = '200px'
-        detail.style.opacity = '1'
-        detail.style.marginLeft = '2px'
       })
-      badge.addEventListener('mouseleave', function () {
-        badge.style.background = 'rgba(40,44,52,.72)'
-        badge.style.boxShadow = '0 2px 8px rgba(0,0,0,.25)'
-        detail.style.maxWidth = '0'
-        detail.style.opacity = '0'
-        detail.style.marginLeft = '0'
+      banner.querySelector('[data-action="close"]').addEventListener('click', function () {
+        banner.remove()
+        var githubLink = document.querySelector('[data-dsh-github-link]')
+        if (githubLink) {
+          var banners = document.querySelector('[data-dsh-update-banners]')
+          githubLink.style.top = (16 + (banners ? banners.offsetHeight : 0)) + 'px'
+        }
       })
 
-      // 点击触发安装确认流程
-      badge.addEventListener('click', function () {
+      container.appendChild(banner)
+      var githubLink = document.querySelector('[data-dsh-github-link]')
+      if (githubLink) {
+        githubLink.style.top = (16 + container.offsetHeight) + 'px'
+      }
+    })()
+  `
+  try {
+    await mainWindow.webContents.executeJavaScript(bannerCode)
+  } catch (err) {
+    // 页面尚未就绪或上下文已销毁时静默忽略（6h 轮询触发但页面处于 loading/error 页）
+    console.warn(`[DSH] 注入 DSH 更新横幅失败: ${(err as Error).message}`)
+  }
+}
+
+/**
+ * 向 DSH UI 顶部注入 DSH Desktop 客户端更新横幅
+ *
+ * 紫色横幅，明确文案「DSH Desktop 客户端有更新 v当前 → v最新」。
+ * 点击「前往下载」调用 window.dsh.installUpdate，弹出确认框后打开 GitHub Release 页面。
+ * 关闭按钮仅隐藏横幅。
+ */
+async function injectAppUpdateBanner(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!pendingAppUpdateVersion) return
+  if (!isDshPageLoaded()) return
+  if (!isValidVersion(pendingAppUpdateVersion)) {
+    console.warn(`[DSH] 最新版本号格式非法，放弃注入客户端更新横幅: ${pendingAppUpdateVersion}`)
+    return
+  }
+  const currentVersion = getInstalledAppVersion()
+  const latestVersion = pendingAppUpdateVersion
+  const bannerCode = `
+    (function () {
+      var container = document.querySelector('[data-dsh-update-banners]')
+      if (!container) {
+        container = document.createElement('div')
+        container.setAttribute('data-dsh-update-banners', '')
+        container.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;'
+        document.body.appendChild(container)
+      }
+      var existing = container.querySelector('[data-dsh-update-banner="app"]')
+      if (existing) existing.remove()
+
+      var banner = document.createElement('div')
+      banner.setAttribute('data-dsh-update-banner', 'app')
+      banner.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 16px;background:#7c3aed;color:#fff;font-size:13px;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,.25);'
+      banner.innerHTML = '<span>DSH Desktop 客户端有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:#fff;color:#7c3aed;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">前往下载</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
+
+      banner.querySelector('[data-action="update"]').addEventListener('click', function () {
         if (window.dsh && typeof window.dsh.installUpdate === 'function') {
           window.dsh.installUpdate()
         }
       })
-      document.body.appendChild(badge)
+      banner.querySelector('[data-action="close"]').addEventListener('click', function () {
+        banner.remove()
+        var githubLink = document.querySelector('[data-dsh-github-link]')
+        if (githubLink) {
+          var banners = document.querySelector('[data-dsh-update-banners]')
+          githubLink.style.top = (16 + (banners ? banners.offsetHeight : 0)) + 'px'
+        }
+      })
+
+      container.appendChild(banner)
+      var githubLink = document.querySelector('[data-dsh-github-link]')
+      if (githubLink) {
+        githubLink.style.top = (16 + container.offsetHeight) + 'px'
+      }
     })()
   `
-  await mainWindow.webContents.executeJavaScript(badgeCode)
+  try {
+    await mainWindow.webContents.executeJavaScript(bannerCode)
+  } catch (err) {
+    console.warn(`[DSH] 注入客户端更新横幅失败: ${(err as Error).message}`)
+  }
 }
 
 /**
@@ -430,9 +490,11 @@ async function injectUpdateBadge(): Promise<void> {
  *
  * 图标可点击，点击后调用 window.dsh.openExternal 在系统默认浏览器打开仓库。
  * 注入前先判断图标是否已存在，避免重复注入。
+ * 若页面顶部已有更新横幅，图标会自动下移，避免被横幅遮挡。
  */
 async function injectGitHubLink(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!isDshPageLoaded()) return
   const linkCode = `
     (function () {
       if (document.querySelector('[data-dsh-github-link]')) {
@@ -441,7 +503,10 @@ async function injectGitHubLink(): Promise<void> {
       var link = document.createElement('div')
       link.setAttribute('data-dsh-github-link', '')
       link.title = '查看 GitHub 仓库'
-      link.style.cssText = 'position: fixed; top: 16px; right: 16px; z-index: 2147483647; width: 40px; height: 40px; border-radius: 20px; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.3);'
+      var bannerHeight = 0
+      var banners = document.querySelector('[data-dsh-update-banners]')
+      if (banners) bannerHeight = banners.offsetHeight
+      link.style.cssText = 'position: fixed; top: ' + (16 + bannerHeight) + 'px; right: 16px; z-index: 2147483647; width: 40px; height: 40px; border-radius: 20px; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.3);'
       link.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 16 16" fill="#fff"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
       link.addEventListener('click', function () {
         if (window.dsh && typeof window.dsh.openExternal === 'function') {
@@ -451,56 +516,31 @@ async function injectGitHubLink(): Promise<void> {
       document.body.appendChild(link)
     })()
   `
-  await mainWindow.webContents.executeJavaScript(linkCode)
+  try {
+    await mainWindow.webContents.executeJavaScript(linkCode)
+  } catch (err) {
+    console.warn(`[DSH] 注入 GitHub 仓库链接失败: ${(err as Error).message}`)
+  }
 }
 
-/**
- * 执行桌面应用安装流程
- *
- * 校验安装包存在后停止 DSH 服务，弹出提示，启动安装向导并退出应用。
- */
-async function performAppUpdate(): Promise<void> {
-  if (!pendingAppUpdateVersion) return
-  const installerPath = getDownloadedAppPath(pendingAppUpdateVersion)
-  // 校验安装包存在，不存在则报错返回
-  if (!existsSync(installerPath)) {
-    dialog.showMessageBox(mainWindow!, {
-      type: 'error',
-      title: '更新失败',
-      message: '安装包不存在',
-      detail: `未找到安装包: ${installerPath}`
-    })
-    return
-  }
-
-  try {
-    await stopDsh()
-  } catch (err) {
-    console.error(`[DSH] 更新前停止 DSH 失败: ${(err as Error).message}`)
-  }
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: '准备安装',
-      message: '应用即将关闭',
-      detail: '请在安装向导中完成安装'
-    })
-  }
-
-  try {
-    spawn(installerPath, [], { detached: true, stdio: 'ignore' }).unref()
-  } catch (err) {
-    console.error(`[DSH] 启动安装向导失败: ${(err as Error).message}`)
-  }
-  app.quit()
-}
+// 固定 AppUserModelID，与 electron-builder.yml 的 appId 保持一致。
+// 必须严格在 app.whenReady() resolve 之前调用：
+// 1) Electron 官方要求此方法必须在 ready 事件之前执行，才能让 Windows 在启动进程时
+//    正确把该进程与 AppUserModelID 关联；
+// 2) AppUserModelID 是 Windows 任务栏/开始菜单对应用身份识别的依据——
+//    安装阶段注册的 HKLM\SOFTWARE\Classes\AppUserModelID\com.dsh.desktop
+//    会被任务栏固定条目引用，必须跨升级保持不变（见 AGENTS.md §8.1）；
+// 3) 升级路径上 electron-builder NSIS 模板靠 ${isUpdated} 标志启用 keep-shortcuts
+//    链路，本调用仅负责运行时关联。
+app.setAppUserModelId('com.dsh.desktop')
 
 // 应用就绪时启动
 app.whenReady().then(() => {
-  // 固定 AppUserModelID，与 electron-builder.yml 的 appId 保持一致，
-  // 让 Windows 在升级/重装时能稳定识别应用外壳，避免任务栏固定图标因注册信息重建而失效
-  app.setAppUserModelId('com.dsh.desktop')
+  // 一次性诊断：升级后默认在主进程启动路径上打印 AppUserModelID 与 .exe 路径，
+  // 如果用户反馈任务栏丢失可在终端/日志头里查到本行，确认运行时是否拿到了正确的身份关联。
+  console.log(`[DSH] AppUserModelID = ${app.getPath('exe')} | AUMID=com.dsh.desktop`)
+  // 一次性：清理旧版本下载到安装目录下的遗留安装包
+  cleanupLegacyInstallers()
   createWindow()
   void startDshAndLoad()
   // 启动 DSH 更新定时轮询（每 6 小时，仅在打包环境生效）
@@ -536,7 +576,15 @@ ipcMain.on('retry', async () => {
 
 // 在线修复 DSH 包事件
 // 由错误页面"在线修复"按钮触发，下载并解压 DSH 包到用户缓存目录
+// 受 isRepairing 互斥锁保护，防止并发点击重复触发（共享 staging 目录互踩）
 ipcMain.handle('repair-dsh', async (event) => {
+  if (!isTrustedSender(event)) {
+    return { success: false, error: '不受信任的调用来源' }
+  }
+  if (isRepairing) {
+    return { success: false, error: '修复正在进行中，请勿重复操作' }
+  }
+  isRepairing = true
   try {
     const cachePath = await repairDsh((msg) => {
       // 上报修复进度到渲染进程
@@ -548,6 +596,8 @@ ipcMain.handle('repair-dsh', async (event) => {
   } catch (err) {
     console.error(`[DSH] 在线修复失败: ${(err as Error).message}`)
     return { success: false, error: (err as Error).message }
+  } finally {
+    isRepairing = false
   }
 })
 
@@ -569,7 +619,10 @@ ipcMain.handle('get-app-version', async () => app.getVersion())
 
 // 在系统默认浏览器中打开外部链接
 // 由 DSH UI 中的 GitHub 图标触发，仅允许 http(s) 协议
-ipcMain.handle('open-external', async (_event, url: string) => {
+ipcMain.handle('open-external', async (event, url: string) => {
+  if (!isTrustedSender(event)) {
+    return { success: false, error: '不受信任的调用来源' }
+  }
   try {
     if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
       return { success: false, error: '不支持的链接格式' }
@@ -581,22 +634,39 @@ ipcMain.handle('open-external', async (_event, url: string) => {
   }
 })
 
-// 桌面应用安装更新事件
-// 由 DSH UI 中的更新徽标触发，确认后执行安装流程
-ipcMain.on('install-update', async () => {
+/**
+ * DSH 运行包更新事件
+ *
+ * 由 DSH UI 中的 DSH 更新横幅触发，直接执行 DSH 更新流程。
+ */
+ipcMain.on('install-dsh-update', async (event) => {
+  if (!isTrustedSender(event)) return
+  if (!pendingDshUpdateVersion) return
+  await performUpdate()
+})
+
+/**
+ * 客户端更新引导事件
+ *
+ * 由 DSH UI 中的客户端更新横幅触发，弹出确认框后打开 GitHub Release 页面，
+ * 由用户手动下载最新安装包并完成更新（不再自动下载安装）。
+ */
+ipcMain.on('install-update', async (event) => {
+  if (!isTrustedSender(event)) return
   if (!app.isPackaged) return
-  if (!pendingAppUpdateVersion) return
-  const result = await dialog.showMessageBox(mainWindow!, {
+  if (!pendingAppUpdateVersion || !pendingAppUpdateReleaseUrl) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const result = await dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: '发现新版本',
-    message: 'DSH Desktop 有新版本可用',
-    detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${pendingAppUpdateVersion}\n\n是否立即更新?`,
-    buttons: ['立即更新', '稍后更新'],
+    message: 'DSH Desktop 客户端有新版本可用',
+    detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${pendingAppUpdateVersion}\n\n点击「前往下载」将打开 GitHub Release 页面，请下载最新安装包并手动完成更新。`,
+    buttons: ['前往下载', '稍后更新'],
     defaultId: 0,
     cancelId: 1
   })
   if (result.response === 0) {
-    await performAppUpdate()
+    await shell.openExternal(pendingAppUpdateReleaseUrl)
   }
 })
 

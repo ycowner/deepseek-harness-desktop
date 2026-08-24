@@ -1,23 +1,34 @@
-import { get } from 'https'
-import { existsSync, mkdirSync, rmSync, renameSync, createWriteStream, writeFileSync, readdirSync, statSync, copyFileSync } from 'fs'
+import { net } from 'electron'
+import { existsSync, mkdirSync, rmSync, renameSync, createWriteStream, createReadStream, writeFileSync, readdirSync, copyFileSync, unlinkSync } from 'fs'
+import { createHash } from 'crypto'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
-import { spawn } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
 import { getNodeBinaryPath, getNodeDir } from './node-binary'
-import { fetchLatestVersion } from './dsh-version'
+import { fetchLatestVersion, fetchDistIntegrity } from './dsh-version'
 
 /**
- * DSH 在线修复模块
+ * DSH 在线修复 / 更新模块
  *
- * 当 dsh-bundled 损坏或缺失时，通过 node.exe 内置的 https 模块下载 DSH 包 tgz，
- * 使用 Windows 自带的 tar.exe（System32）解压到用户可写目录。
+ * 当 dsh-bundled 损坏或缺失、或用户触发 DSH 更新时，下载 DSH 包 tgz，
+ * 通过内置 npm 安装到临时目录，再复制到用户可写的缓存目录。
  *
- * 修复后的 DSH 包存放在：%LOCALAPPDATA%/DSH Desktop/dsh-cache
+ * 修复后的 DSH 包存放在：%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/
  * 该目录会被 dsh-manager.ts 中的 findCachedDshEntry 优先识别。
+ *
+ * 两阶段设计（关键约束，见 AGENTS.md §12）：
+ * 1. prepareDshPackage：下载 + 完整性校验 + npm 安装 + 复制到 staging 目录
+ *    （dsh-cache/dsh.staging.<ts>/），全程不触碰现有 dsh/ 缓存目录，
+ *    因此更新期间旧 DSH 进程可以继续运行；
+ * 2. activateDshPackage：rm 旧缓存 + rename staging，不可用窗口仅毫秒级。
+ *    调用方负责在 activate 之前停止 DSH 进程——Windows 下运行中的
+ *    native 模块（node-pty 等 .node 文件）会锁定缓存目录导致 rmSync EPERM。
  */
 
 // npm registry 地址
 const NPM_REGISTRY = 'https://registry.npmjs.org'
+// 国内镜像（阿里云 npmmirror），优先使用，失败回退到 NPM_REGISTRY
+const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 
 /**
@@ -32,57 +43,86 @@ export function getDshRepairCacheDir(): string {
   return dir
 }
 
+/** 下载空闲超时（毫秒）：有数据流动即重置计时 */
+const DOWNLOAD_IDLE_TIMEOUT = 120_000
+
 /**
- * 下载文件（支持 302 重定向）
+ * 下载文件（Electron net.fetch：自动遵循系统代理、自动跟随重定向）
+ *
+ * 空闲超时 120 秒：每次收到数据块重置计时；中断/出错时删除部分文件。
+ *
  * @param url 下载地址
  * @param dest 目标文件路径
  * @param onProgress 进度回调（已下载字节数）
  */
-function downloadFile(url: string, dest: string, onProgress?: (downloaded: number) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const req = get(url, (res) => {
-      // 处理重定向
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume()
-        downloadFile(res.headers.location, dest, onProgress).then(resolve).catch(reject)
-        return
-      }
-      if (res.statusCode !== 200) {
-        reject(new Error(`下载失败 (状态码 ${res.statusCode})`))
-        return
-      }
-      const stream = createWriteStream(dest)
-      let downloaded = 0
-      res.on('data', (chunk: Buffer) => {
-        downloaded += chunk.length
+async function downloadFile(url: string, dest: string, onProgress?: (downloaded: number) => void): Promise<void> {
+  const controller = new AbortController()
+  let timer = setTimeout(() => controller.abort(), DOWNLOAD_IDLE_TIMEOUT)
+  const resetTimer = (): void => {
+    clearTimeout(timer)
+    timer = setTimeout(() => controller.abort(), DOWNLOAD_IDLE_TIMEOUT)
+  }
+
+  try {
+    const res = await net.fetch(url, { signal: controller.signal })
+    if (!res.ok || !res.body) {
+      throw new Error(`下载失败 (状态码 ${res.status})`)
+    }
+
+    const reader = res.body.getReader()
+    const stream = createWriteStream(dest)
+    let downloaded = 0
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        resetTimer()
+        downloaded += value.byteLength
         onProgress?.(downloaded)
+        // 背压处理：写缓冲满时等待 drain，避免内存堆积
+        if (!stream.write(value)) {
+          await new Promise<void>((resolveDrain, rejectDrain) => {
+            stream.once('drain', resolveDrain)
+            stream.once('error', rejectDrain)
+          })
+        }
+      }
+      await new Promise<void>((resolveClose, rejectClose) => {
+        stream.close((err) => (err ? rejectClose(new Error(`关闭文件失败: ${err.message}`)) : resolveClose()))
       })
-      res.pipe(stream)
-      stream.on('finish', () => {
-        stream.close((err) => {
-          if (err) reject(new Error(`关闭文件失败: ${err.message}`))
-          else resolve()
-        })
-      })
-      stream.on('error', reject)
-    })
-    req.on('error', reject)
-    req.setTimeout(120_000, () => {
-      req.destroy()
-      reject(new Error('下载超时（120秒）'))
-    })
-  })
+    } catch (err) {
+      stream.destroy()
+      try { unlinkSync(dest) } catch { /* 忽略 */ }
+      throw err
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      try { unlinkSync(dest) } catch { /* 忽略 */ }
+      throw new Error('下载超时（120秒无数据传输）')
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
- * 检查 Windows tar.exe 是否可用
+ * 校验文件 sha512 与 npm dist.integrity 是否匹配
+ *
+ * @param filePath 待校验文件路径
+ * @param integrity npm packument 的 dist.integrity，形如 "sha512-<base64>"
  */
-function checkTarAvailable(): boolean {
-  try {
-    const result = spawn('tar.exe', ['--version'], { shell: true, stdio: 'pipe' })
-    return result.pid !== undefined
-  } catch {
-    return false
+async function verifyFileIntegrity(filePath: string, integrity: string): Promise<void> {
+  const expected = integrity.replace(/^sha512-/, '')
+  const actual = await new Promise<string>((resolveHash, rejectHash) => {
+    const hash = createHash('sha512')
+    const rs = createReadStream(filePath)
+    rs.on('data', (chunk) => hash.update(chunk))
+    rs.on('end', () => resolveHash(hash.digest('base64')))
+    rs.on('error', rejectHash)
+  })
+  if (actual !== expected) {
+    throw new Error('DSH 包完整性校验失败（sha512 不匹配），安装包可能被篡改或下载损坏')
   }
 }
 
@@ -90,19 +130,51 @@ function checkTarAvailable(): boolean {
 const NPM_INSTALL_TIMEOUT = 300_000
 
 /**
- * 用内置 npm 为 DSH 包补装运行时依赖
+ * 在空目录跑 `npm install <tgz>`，让 npm 把 tgz 当作要安装的包
  *
- * 从 npm 下载解压的 tgz 不含 node_modules，需在解压产物根目录执行
- * `npm install --omit=dev` 安装 dependencies，否则 DSH 启动会报 ERR_MODULE_NOT_FOUND。
+ * 不能在 DSH 包目录里直接跑 `npm install`：cwd 的 package.json name 是
+ * `@deepseek-ai/dsh`，npm 的 reify 阶段会把所有 `@deepseek-ai/dsh-*` 依赖当作
+ * self-scope 跳过（node_modules/@deepseek-ai/dsh-* 一个都不会装），同时清理 cwd
+ * 中 `files` 字段之外的源文件（lib/、config/、LICENSE 都会被删，只剩 README 和 package.json）。
  *
- * @param pkgDir DSH 包（含 package.json）所在目录（必须是用户可写目录）
+ * 改为在空目录跑 `npm install <tgz>`：npm 会把 tgz 解压到
+ * `installDir/node_modules/@deepseek-ai/dsh/`（完整保留 lib/），并安装其 dependencies
+ * 到 `installDir/node_modules/`。这正是 `preinstall-dsh.js` 走 npx 流程的成功路径。
+ *
+ * 优先使用国内镜像（npmmirror）加速依赖下载，失败回退到 npm registry（npmjs.org）。
+ * 添加 --prefer-offline 让 npm 优先使用本地缓存，配合复用旧 node_modules 实现增量更新。
+ *
+ * @param tgzPath DSH 包 tgz 文件路径
+ * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
  * @param onProgress 进度回调（文字描述）
  */
-function installPackageDependencies(pkgDir: string, onProgress?: (msg: string) => void): Promise<void> {
+function installDshFromTarball(tgzPath: string, installDir: string, onProgress?: (msg: string) => void): Promise<void> {
+  return installDshFromTarballWithRegistry(tgzPath, installDir, NPM_REGISTRY_MIRROR, onProgress)
+    .catch((mirrorErr) => {
+      console.warn(`[DSH Repair] 国内镜像安装失败，回退到 npm registry: ${mirrorErr.message}`)
+      onProgress?.('国内镜像安装失败，回退到 npm registry 重试...')
+      return installDshFromTarballWithRegistry(tgzPath, installDir, NPM_REGISTRY, onProgress)
+    })
+}
+
+/**
+ * 在空目录跑 `npm install <tgz>`，使用指定 registry（内部实现）
+ *
+ * @param tgzPath DSH 包 tgz 文件路径
+ * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
+ * @param registry npm registry 根地址
+ * @param onProgress 进度回调（文字描述）
+ */
+function installDshFromTarballWithRegistry(
+  tgzPath: string,
+  installDir: string,
+  registry: string,
+  onProgress?: (msg: string) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const npmCli = join(getNodeDir(), 'node_modules', 'npm', 'bin', 'npm-cli.js')
     if (!existsSync(npmCli)) {
-      reject(new Error('内置 npm 不可用，无法安装 DSH 包依赖'))
+      reject(new Error('内置 npm 不可用，无法安装 DSH 包'))
       return
     }
 
@@ -110,11 +182,21 @@ function installPackageDependencies(pkgDir: string, onProgress?: (msg: string) =
     const npmCacheDir = join(localAppData, 'DSH Desktop', 'npm-cache')
     mkdirSync(npmCacheDir, { recursive: true })
 
+    // --no-save：不修改 installDir 的 package.json（installDir 本就是空的，无需记录依赖）
+    // --omit=dev：DSH 的 devDependencies 是构建期工具，运行时不需要
+    // --registry：指定 npm registry（国内镜像或国外源）
+    // --prefer-offline：优先用本地 npm 缓存，配合复用旧 node_modules 加速增量安装
     const child = spawn(
       getNodeBinaryPath(),
-      [npmCli, 'install', '--omit=dev', '--no-audit', '--no-fund', '--loglevel=warn'],
+      [
+        npmCli, 'install', tgzPath,
+        '--omit=dev', '--no-save', '--no-audit', '--no-fund',
+        '--loglevel=warn',
+        '--registry=' + registry,
+        '--prefer-offline'
+      ],
       {
-        cwd: pkgDir,
+        cwd: installDir,
         windowsHide: true,
         env: {
           ...process.env,
@@ -137,7 +219,7 @@ function installPackageDependencies(pkgDir: string, onProgress?: (msg: string) =
         if (match) {
           onProgress?.(`已安装 ${match[1]} 个依赖包...`)
         } else {
-          onProgress?.('正在安装 DSH 包依赖...')
+          onProgress?.('正在安装 DSH 包及其依赖...')
         }
         lastProgressTime = now
       }
@@ -147,11 +229,20 @@ function installPackageDependencies(pkgDir: string, onProgress?: (msg: string) =
       stderr += chunk.toString()
     })
 
-    onProgress?.('正在安装 DSH 包依赖...')
+    onProgress?.('正在安装 DSH 包及其依赖...')
 
     const timeout = setTimeout(() => {
-      child.kill('SIGTERM')
-      reject(new Error('npm 安装依赖超时（5分钟），请检查网络连接'))
+      // Windows 下 child.kill 杀不掉 npm 派生的子进程树，必须 taskkill /f /t
+      //（与 dsh-manager.stopDsh 同一原则，见 AGENTS.md §12.1）
+      if (process.platform === 'win32' && child.pid !== undefined) {
+        try {
+          // 使用 execFile 传参数组形式，避免 shell 元字符风险
+          execFileSync('taskkill', ['/pid', String(child.pid), '/f', '/t'], { stdio: 'ignore' })
+        } catch { /* 进程可能已退出 */ }
+      } else {
+        child.kill('SIGTERM')
+      }
+      reject(new Error('npm 安装超时（5分钟），请检查网络连接'))
     }, NPM_INSTALL_TIMEOUT)
 
     child.on('error', (err) => {
@@ -162,50 +253,18 @@ function installPackageDependencies(pkgDir: string, onProgress?: (msg: string) =
     child.on('exit', (code) => {
       clearTimeout(timeout)
       if (code === 0) {
-        onProgress?.('DSH 包依赖安装完成')
+        onProgress?.('DSH 包及其依赖安装完成')
         resolve()
       } else {
         const errMsg = stderr || stdout || '未知错误'
         const combinedMsg = errMsg.toLowerCase()
         if (combinedMsg.includes('eperm') || combinedMsg.includes('operation not permitted')) {
-          reject(new Error(`npm 安装依赖失败: 权限不足，无法写入缓存目录。请检查杀毒软件或手动删除旧缓存后重试。\n${errMsg}`))
+          reject(new Error(`npm 安装失败: 权限不足，无法写入缓存目录。请检查杀毒软件或手动删除旧缓存后重试。\n${errMsg}`))
         } else if (combinedMsg.includes('etimedout') || combinedMsg.includes('econnreset') || combinedMsg.includes('network')) {
-          reject(new Error(`npm 安装依赖失败: 网络连接异常。请检查网络后重试。\n${errMsg}`))
+          reject(new Error(`npm 安装失败: 网络连接异常。请检查网络后重试。\n${errMsg}`))
         } else {
-          reject(new Error(`npm 安装依赖失败 (退出码 ${code})\n${errMsg}`))
+          reject(new Error(`npm 安装失败 (退出码 ${code})\n${errMsg}`))
         }
-      }
-    })
-  })
-}
-
-/**
- * 用 Windows tar.exe 解压 tgz 到指定目录
- * @param tgzPath tgz 文件路径
- * @param destDir 解压目标目录
- */
-function extractTgz(tgzPath: string, destDir: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!checkTarAvailable()) {
-      reject(new Error('Windows tar.exe 不可用，请使用 Windows 10 1803+ 或手动安装 DSH 包'))
-      return
-    }
-    const child = spawn('tar.exe', ['-xzf', tgzPath, '-C', destDir], {
-      shell: true,
-      windowsHide: true
-    })
-    let stderr = ''
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
-    child.on('error', (err) => {
-      reject(new Error(`tar.exe 启动失败: ${err.message}`))
-    })
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve()
-      } else {
-        reject(new Error(`tar.exe 解压失败 (退出码 ${code})\n${stderr}`))
       }
     })
   })
@@ -230,32 +289,66 @@ function copyDir(src: string, dest: string): void {
 }
 
 /**
- * 在线修复 DSH 包
+ * 清扫缓存目录中残留的 staging / tmp 目录（上次更新或修复中断的产物）
+ */
+function cleanupStaleStagingDirs(): void {
+  const cacheDir = getDshRepairCacheDir()
+  try {
+    for (const entry of readdirSync(cacheDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && (entry.name.startsWith('dsh.staging.') || entry.name === 'dsh.tmp')) {
+        try {
+          rmSync(join(cacheDir, entry.name), { recursive: true, force: true })
+          console.log(`[DSH Repair] 清理残留目录: ${entry.name}`)
+        } catch { /* 忽略单个失败 */ }
+      }
+    }
+  } catch { /* 忽略 */ }
+}
+
+/**
+ * prepareDshPackage 的产物
+ */
+export interface PreparedDshPackage {
+  /** 完整构建并校验过的 staging 目录（尚未激活） */
+  stagingDir: string
+  /** 本次准备的 DSH 版本号 */
+  version: string
+}
+
+/**
+ * 阶段一：准备新版 DSH 包（下载 → 完整性校验 → npm 安装 → 复制到 staging）
  *
  * 流程：
- * 1. 获取最新版本号
- * 2. 下载 tgz 到临时目录
- * 3. tar.exe 解压 tgz
- * 4. 复制到用户缓存目录（确保在用户可写目录执行 npm install）
- * 5. 在缓存目录执行 npm install 补装依赖
- * 6. 原子 rename 到最终目录
- * 7. 清理临时文件
+ * 1. 获取最新版本号（优先国内镜像 npmmirror，失败回退 npm registry）
+ * 2. 下载 tgz 到临时目录（双源）
+ * 3. 用 npm dist.integrity（sha512）校验 tgz 完整性
+ * 4. 复用现有缓存中的旧 node_modules 到安装目录（若存在），加速增量安装
+ * 5. 在空目录跑 `npm install <tgz>`（不能在 DSH 包目录里跑，详见
+ *    installDshFromTarball 注释），npm 解压 tgz 并安装全部 dependencies
+ * 6. 校验安装产物（lib/bin.js 存在）
+ * 7. 复制到 staging 目录 dsh-cache/dsh.staging.<ts>/
+ *
+ * 全程不触碰现有 dsh/ 缓存目录，更新期间旧 DSH 进程可继续运行。
+ * 失败时清理 staging 与临时目录，现有缓存不受影响。
  *
  * @param onProgress 进度回调（文字描述当前步骤）
- * @returns 修复后的 DSH 包目录路径
+ * @returns staging 目录与版本号，由调用方择机 activate
  */
-export async function repairDsh(
+export async function prepareDshPackage(
   onProgress?: (msg: string) => void
-): Promise<string> {
+): Promise<PreparedDshPackage> {
   const report = (msg: string): void => {
     console.log(`[DSH Repair] ${msg}`)
     onProgress?.(msg)
   }
 
-  // 0. 校验 node.exe（虽然修复本身不直接用 node，但运行 DSH 需要）
+  // 0. 校验内置 node.exe（npm install 由内置 node 执行，DSH 运行同样依赖它）
   if (!existsSync(getNodeBinaryPath())) {
-    throw new Error('内置 Node.js 不存在，无法验证环境')
+    throw new Error('内置 Node.js 不存在，无法安装 DSH 包')
   }
+
+  // 清扫上次更新/修复中断残留的 staging 目录
+  cleanupStaleStagingDirs()
 
   // 1. 获取最新版本
   report('正在获取最新版本号...')
@@ -266,65 +359,102 @@ export async function repairDsh(
   const tempDir = join(tmpdir(), `dsh-repair-${Date.now()}`)
   mkdirSync(tempDir, { recursive: true })
   const tgzPath = join(tempDir, `dsh-${version}.tgz`)
-  const extractDir = join(tempDir, 'extracted')
-  mkdirSync(extractDir, { recursive: true })
+  // npm install 的 cwd：必须是空目录，让 npm 把 tgz 当作要安装的包（而非项目根）
+  const installDir = join(tempDir, 'install-root')
+  mkdirSync(installDir, { recursive: true })
 
-  // 预先计算缓存目标路径
   const cacheDir = getDshRepairCacheDir()
-  const targetDir = join(cacheDir, 'dsh')
-  const tempTargetDir = join(cacheDir, 'dsh.tmp')
+  const stagingDir = join(cacheDir, `dsh.staging.${Date.now()}`)
 
   try {
-    // 3. 下载 tgz
-    const tgzUrl = `${NPM_REGISTRY}/${DSH_PACKAGE}/-/dsh-${version}.tgz`
-    report(`正在下载 DSH 包...`)
-    await downloadFile(tgzUrl, tgzPath, (downloaded) => {
-      if (downloaded % (1024 * 1024) < 100 * 1024) {
+    // 3. 下载 tgz（优先国内镜像，失败回退 npm registry）
+    const mirrorTgzUrl = `${NPM_REGISTRY_MIRROR}/${DSH_PACKAGE}/-/dsh-${version}.tgz`
+    const primaryTgzUrl = `${NPM_REGISTRY}/${DSH_PACKAGE}/-/dsh-${version}.tgz`
+    let lastReportedMB = -1
+    const reportDownloadProgress = (downloaded: number): void => {
+      const mb = Math.floor(downloaded / (1024 * 1024))
+      if (mb !== lastReportedMB) {
+        lastReportedMB = mb
         report(`下载中: ${(downloaded / 1024 / 1024).toFixed(1)} MB`)
       }
-    })
+    }
+    report('正在下载 DSH 包（国内镜像）...')
+    try {
+      await downloadFile(mirrorTgzUrl, tgzPath, reportDownloadProgress)
+    } catch (mirrorErr) {
+      report(`国内镜像下载失败，回退到 npm registry: ${(mirrorErr as Error).message}`)
+      // 清理可能的部分下载文件
+      if (existsSync(tgzPath)) {
+        try { unlinkSync(tgzPath) } catch { /* 忽略 */ }
+      }
+      lastReportedMB = -1
+      report('正在下载 DSH 包（npm registry）...')
+      await downloadFile(primaryTgzUrl, tgzPath, reportDownloadProgress)
+    }
     report('下载完成')
 
-    // 4. 解压
-    report('正在解压...')
-    await extractTgz(tgzPath, extractDir)
-    const packageDir = join(extractDir, 'package')
-    if (!existsSync(packageDir)) {
-      throw new Error('解压后未找到 package 目录，文件结构异常')
-    }
-    report('解压完成')
+    // 4. 完整性校验：npm dist.integrity（sha512），防镜像污染/下载损坏
+    report('正在校验安装包完整性...')
+    const integrity = await fetchDistIntegrity(version)
+    await verifyFileIntegrity(tgzPath, integrity)
+    report('完整性校验通过')
 
-    // 5. 先复制到缓存目录（用户可写），再在缓存目录执行 npm install
-    //    避免在临时目录执行 npm install 触发 EPERM 权限错误
-    report('正在准备安装目录...')
-    if (existsSync(tempTargetDir)) {
-      rmSync(tempTargetDir, { recursive: true, force: true })
+    // 5. 复用缓存目录中已有的旧版 node_modules，让 npm install 走增量更新
+    // （配合 --prefer-offline 最大化提速；npm 会自动覆盖 @deepseek-ai/dsh 旧版本）
+    const existingNodeModules = join(cacheDir, 'dsh', 'node_modules')
+    if (existsSync(existingNodeModules)) {
+      report('检测到旧版本依赖缓存，复用以加速安装...')
+      try {
+        copyDir(existingNodeModules, join(installDir, 'node_modules'))
+        report('旧依赖复用完成')
+      } catch (err) {
+        console.warn(`[DSH Repair] 复用旧依赖失败，将全量安装: ${(err as Error).message}`)
+        // 清理可能的部分复制，避免污染后续 npm install
+        const partialNodeModules = join(installDir, 'node_modules')
+        if (existsSync(partialNodeModules)) {
+          try { rmSync(partialNodeModules, { recursive: true, force: true }) } catch { /* 忽略 */ }
+        }
+      }
     }
-    if (existsSync(targetDir)) {
-      rmSync(targetDir, { recursive: true, force: true })
-    }
-    copyDir(packageDir, tempTargetDir)
 
-    // 预检查缓存目录是否可写（在 npm install 之前发现权限问题）
+    // 6. 在空目录跑 npm install <tgz>
+    report('正在安装 DSH 包及其依赖...')
+    await installDshFromTarball(tgzPath, installDir, report)
+
+    // 7. 校验 npm install 产物
+    const installedDshDir = join(installDir, 'node_modules', '@deepseek-ai', 'dsh')
+    if (!existsSync(installedDshDir) || !existsSync(join(installedDshDir, 'lib', 'bin.js'))) {
+      throw new Error('npm install 后未找到 DSH 包或 lib/bin.js，安装异常')
+    }
+    report('DSH 包安装完成')
+
+    // 8. 复制到 staging 目录（不触碰现有 dsh/ 缓存）
+    report('正在准备新版本缓存...')
+    copyDir(installedDshDir, stagingDir)
+
+    // 预检查缓存目录可写（在复制 node_modules 之前发现权限问题）
     try {
-      const testFile = join(tempTargetDir, '.write-test')
+      const testFile = join(stagingDir, '.write-test')
       writeFileSync(testFile, '')
       rmSync(testFile)
     } catch {
-      throw new Error('缓存目录不可写，无法安装 DSH 包依赖。请检查磁盘空间或权限设置。')
+      throw new Error('缓存目录不可写，无法保存 DSH 包。请检查磁盘空间或权限设置。')
     }
 
-    // 6. 在缓存目录（用户可写）执行 npm install 补装运行时依赖
-    report('正在安装 DSH 包依赖...')
-    await installPackageDependencies(tempTargetDir, report)
+    // 复制 node_modules 依赖（含 @deepseek-ai/dsh-* 等所有运行时依赖）
+    const installedNodeModules = join(installDir, 'node_modules')
+    copyDir(installedNodeModules, join(stagingDir, 'node_modules'))
 
-    // 7. 原子 rename 到最终目录
-    renameSync(tempTargetDir, targetDir)
-    report(`修复完成，DSH 包已保存到: ${targetDir}`)
-
-    return targetDir
+    report(`新版本 DSH 包已就绪（待激活）: v${version}`)
+    return { stagingDir, version }
+  } catch (err) {
+    // 准备失败：清理 staging，现有缓存目录不受影响
+    if (existsSync(stagingDir)) {
+      try { rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+    }
+    throw err
   } finally {
-    // 清理临时文件
+    // 清理临时下载/安装目录
     try {
       if (existsSync(tempDir)) {
         rmSync(tempDir, { recursive: true, force: true })
@@ -332,13 +462,59 @@ export async function repairDsh(
     } catch (e) {
       console.warn(`[DSH Repair] 清理临时文件失败: ${(e as Error).message}`)
     }
-    // 清理缓存中的临时目标目录（如果流程失败）
-    try {
-      if (existsSync(tempTargetDir)) {
-        rmSync(tempTargetDir, { recursive: true, force: true })
-      }
-    } catch (e) {
-      console.warn(`[DSH Repair] 清理临时目标失败: ${(e as Error).message}`)
+  }
+}
+
+/**
+ * 阶段二：激活 staging 目录为正式缓存（rm 旧缓存 + rename，毫秒级不可用窗口）
+ *
+ * 调用方必须在此之前停止 DSH 进程——Windows 下运行中的 native 模块
+ * 会锁定缓存目录，导致 rmSync 抛 EPERM（更新流程顺序约束见 AGENTS.md §12）。
+ * 失败时旧缓存可能已被删除，下次启动将回退到出厂预装版本（dsh-bundled），
+ * staging 目录残留由下次 prepare 前的 cleanupStaleStagingDirs 清扫。
+ *
+ * @param stagingDir prepareDshPackage 返回的 staging 目录
+ * @returns 激活后的正式缓存目录路径
+ */
+export function activateDshPackage(stagingDir: string): string {
+  const cacheDir = getDshRepairCacheDir()
+  const targetDir = join(cacheDir, 'dsh')
+
+  if (!existsSync(join(stagingDir, 'package.json'))) {
+    throw new Error(`staging 目录无效（缺少 package.json）: ${stagingDir}`)
+  }
+
+  if (existsSync(targetDir)) {
+    rmSync(targetDir, { recursive: true, force: true })
+  }
+  renameSync(stagingDir, targetDir)
+  console.log(`[DSH Repair] DSH 包已激活到: ${targetDir}`)
+  return targetDir
+}
+
+/**
+ * 在线修复 DSH 包（错误页"在线修复"按钮触发的完整流程）
+ *
+ * 错误页场景下 DSH 进程未在运行，可直接准备 + 激活。
+ * DSH 运行中的版本更新请使用 prepareDshPackage / activateDshPackage 分阶段调用
+ *（先 prepare，再 stopDsh，再 activate，最后 startDsh）。
+ *
+ * @param onProgress 进度回调（文字描述当前步骤）
+ * @returns 修复后的 DSH 包目录路径
+ */
+export async function repairDsh(
+  onProgress?: (msg: string) => void
+): Promise<string> {
+  const prepared = await prepareDshPackage(onProgress)
+  try {
+    const targetDir = activateDshPackage(prepared.stagingDir)
+    onProgress?.(`修复完成，DSH 包已保存到: ${targetDir}`)
+    return targetDir
+  } catch (err) {
+    // 激活失败时清理 staging，避免残留
+    if (existsSync(prepared.stagingDir)) {
+      try { rmSync(prepared.stagingDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
     }
+    throw err
   }
 }

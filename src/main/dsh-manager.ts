@@ -3,7 +3,7 @@ import { createServer, type Server } from 'net'
 import { get } from 'http'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
-import { existsSync, mkdirSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
 import { getNodeBinaryPath, getNodeDir, checkNodeBinary } from './node-binary'
 import { getDshRepairCacheDir } from './dsh-repair'
 
@@ -43,10 +43,10 @@ export function findCachedDshEntry(): string | null {
         return join(dshDir, binPath)
       }
     } catch {
-    // 忽略解析错误
+      // 忽略解析错误
+    }
+    return null
   }
-  return null
-}
 
 /**
  * 校验 DSH 包是否依赖完整（可运行）
@@ -68,7 +68,17 @@ function isPkgDepsComplete(dshDir: string): boolean {
     if (!deps || typeof deps !== 'object' || Object.keys(deps).length === 0) {
       return true
     }
-    return existsSync(join(dshDir, 'node_modules'))
+    const nodeModulesDir = join(dshDir, 'node_modules')
+    if (!existsSync(nodeModulesDir)) return false
+    // 校验每个顶层依赖目录存在（捕获 node_modules 存在但复制中断的场景）
+    // 依赖名可能包含 scope（如 @deepseek-ai/dsh-web-app），join 可正确处理
+    for (const dep of Object.keys(deps)) {
+      if (!existsSync(join(nodeModulesDir, dep))) {
+        console.warn(`[DSH] 依赖缺失: ${dep} (${dshDir})`)
+        return false
+      }
+    }
+    return true
   } catch {
     // 解析失败视为完整（交给后续启动流程暴露真实错误）
     return true
@@ -112,7 +122,6 @@ function isPkgDepsComplete(dshDir: string): boolean {
     if (!existsSync(npxDir)) continue
 
     try {
-      const { readdirSync } = require('fs')
       const entries = readdirSync(npxDir, { withFileTypes: true })
       for (const entry of entries) {
         if (!entry.isDirectory()) continue
@@ -184,6 +193,19 @@ const MAX_PORT_RETRIES = 20
 
 // 用于解析 DSH 启动日志中 URL 的正则（兼容 http/https、任意主机与端口）
 const DSH_URL_REGEX = /https?:\/\/[^\s/:]+:(\d{2,5})[^\s]*/i
+
+// DSH 子进程日志环形缓冲容量（防止长跑运行内存泄漏）
+const MAX_LOG_LINES = 500
+
+/**
+ * 向环形缓冲追加一行，超过上限时丢弃最旧行
+ */
+function pushLogLine(arr: string[], line: string): void {
+  arr.push(line)
+  if (arr.length > MAX_LOG_LINES) {
+    arr.splice(0, arr.length - MAX_LOG_LINES)
+  }
+}
 
 /**
  * DSH 进程信息
@@ -400,7 +422,15 @@ export function startDsh(): Promise<DshProcess> {
     console.log(`[DSH] 找到已缓存的 DSH 包，直接运行: ${cachedDshEntry}`)
     // 通过 --port 命令行参数显式传递端口（DSH README 文档支持）
     // 之前仅通过 PORT 环境变量传递，但 DSH 实际未读取该变量，仍监听默认 3080
-    // --no-open 禁止 DSH web 自动打开系统默认浏览器，只让桌面客户端加载 UI
+    // DSH web 启动器（@deepseek-ai/dsh-web-app/lib/startup.js）识别的 flag：
+    // --host / --port / --trusted-host / --no-open / --help
+    // 关键：DSH 子进程默认在服务 ready 后会通过 `open` npm 包打开系统默认浏览器
+    // （参见 dsh-web-app/lib/index.js 的 openBrowser()），这条调用链发生在
+    // DSH 子进程自己 fork 的进程里，完全不走 Electron webContents，
+    // 主进程现有的 setWindowOpenHandler 拦不到。
+    // 加 --no-open 后 startup.js 会把 webStartup.openBrowser 设为 false，
+    // 子进程就不会调 open 包，系统浏览器不会被自动打开，
+    // 由桌面客户端 BrowserWindow.loadURL 加载 UI 即可。
     const spawnArgs: string[] = [cachedDshEntry, 'web', '--port', String(desiredPort), '--no-open']
 
     let child: ChildProcess
@@ -438,7 +468,7 @@ export function startDsh(): Promise<DshProcess> {
       const lines = text.split(/\r?\n/)
       for (const line of lines) {
         if (line.length === 0) continue
-        stdoutLines.push(line)
+        pushLogLine(stdoutLines, line)
         console.log(`[DSH stdout] ${line}`)
 
         if (resolved) continue
@@ -469,7 +499,7 @@ export function startDsh(): Promise<DshProcess> {
       const lines = text.split(/\r?\n/)
       for (const line of lines) {
         if (line.length === 0) continue
-        stderrLines.push(line)
+        pushLogLine(stderrLines, line)
         console.error(`[DSH stderr] ${line}`)
 
         if (resolved) continue
@@ -506,9 +536,12 @@ export function startDsh(): Promise<DshProcess> {
           ? stderrLines.join('\n').slice(-500) // 取最后 500 字符避免过长
           : '无 stderr 输出'
 
-        finishOnce(
-          new Error(`DSH 进程在启动期间退出 (code=${code}, signal=${signal})。\n错误详情: ${errorDetails}`)
-        )
+        const startErr = new Error(`DSH 进程在启动期间退出 (code=${code}, signal=${signal})。\n错误详情: ${errorDetails}`)
+        // 模块缺失类错误视为包损坏，让错误页提供"在线修复"入口（修复路径会重新跑 npm install）
+        if (/ERR_MODULE_NOT_FOUND|Cannot find module/.test(errorDetails)) {
+          startErr.name = DSH_PACKAGE_MISSING_ERROR_NAME
+        }
+        finishOnce(startErr)
       }
       // 若是当前单例进程退出，清理引用
       if (currentDshProcess?.child === child) {

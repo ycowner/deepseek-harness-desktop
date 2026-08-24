@@ -1,6 +1,6 @@
 appId: com.dsh.desktop
 productName: DSH Desktop
-# 安装包产物命名（连字符格式，与 app-update.ts 的检测模板保持一致，避免上传平台对空格的处理）
+# 安装包产物命名（连字符格式，避免上传平台对空格的处理；GitHub Release 页面展示与下载均用此命名）
 artifactName: DSH-Desktop-Setup-${version}.${ext}
 directories:
   # 每个版本在 dist-exe 下拥有独立子目录（如 dist-exe/1.0.1/），避免版本间相互覆盖
@@ -21,10 +21,17 @@ win:
         - x64
   # 应用以管理员权限运行（解决 DSH 创建符号链接的 EPERM 问题）
   requestedExecutionLevel: requireAdministrator
+# 客户端更新：不再使用 electron-updater/Gitee 自动下载安装（自 1.0.3 起），
+# 改为 GitHub releases/latest API 检测新版本后引导用户打开 Release 页面手动下载（见 src/main/app-update.ts）
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   perMachine: true
+  # 卸载时不要删除用户 AppData（DSH/npm 缓存等），即使走控制面板主动卸载也保留。
+  # 默认即为 false，显式写出来便于维护者理解。
+  deleteAppDataOnUninstall: false
+  # 自定义安装/卸载钩子入口。当前为文档与未来扩展点，在本仓库未与默认模板产生差异。
+  include: "build/installer.nsh"
 # 额外资源：将内置 Node.js 二进制和预安装的 DSH 包打包到应用中
 extraResources:
   # Node.js 二进制 + 内置 npm（npm 用于 dsh 在线更新时给下载的包补装依赖）

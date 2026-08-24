@@ -62,9 +62,11 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   └── png-to-ico.ps1
 ├── src/
 │   ├── main/                    ← 主进程
-│   │   ├── index.ts             ← 应用入口、窗口、IPC 路由
-│   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口）
-│   │   ├── dsh-repair.ts        ← 在线修复 DSH 包（npm registry → tar.exe 解压）
+│   │   ├── index.ts             ← 应用入口、窗口、IPC 路由、客户端更新引导
+│   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）
+│   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare staging / activate）
+│   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询
+│   │   ├── app-update.ts        ← 客户端更新 GitHub 检测（Release 页面引导、遗留安装包清理）
 │   │   └── node-binary.ts       ← 内置 Node 二进制路径解析
 │   ├── preload/
 │   │   └── index.ts             ← contextBridge 暴露的 window.dsh.* API
@@ -117,7 +119,10 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │  Electron 主进程 (src/main/index.ts)                        │
 │  ├── BrowserWindow  ──► 加载 loading.html → 加载 error.html  │
 │  │                       → 服务就绪后 loadURL(dsh URL)      │
-│  ├── IPC 路由  ──► 'status' / 'retry' / 'repair-dsh'        │
+│  ├── IPC 路由  ──► 'status' / 'retry' / 'repair-dsh' / 'install-dsh-update'   │
+│  │                'install-update' / 'check-update' / 'get-app-version'      │
+│  │                'get-installed-version' / 'open-external'                 │
+│  ├── 客户端更新  ──► GitHub releases API 检测 → 引导打开 Release 页面手动下载 │
 │  └── 子进程管理 ──► spawn(内置 node.exe + 缓存的 DSH 入口)   │
 │                                                             │
 │       ┌──────────────────────────────────────────┐           │
@@ -160,22 +165,37 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 ### 5.4 IPC 通道
 
-| 通道                | 方向                       | 触发方                  | 说明                                   |
-| ----------------- | ------------------------ | -------------------- | ------------------------------------ |
-| `status`          | main → renderer          | 主进程任意时刻              | 启动进度文字                               |
-| `retry`           | renderer → main          | error.html "重试" 按钮   | 主进程 stop → 重新加载 loading → 重新启动       |
-| `repair-dsh`      | renderer → main (invoke) | error.html "在线修复" 按钮 | 返回 `{ success, cachePath?, error? }` |
-| `repair-progress` | main → renderer          | repairDsh 进度回调       | 步骤文字（"正在下载..." / "解压完成" 等）           |
+| 通道                | 方向                       | 触发方                  | 说明                                                                    |
+| ----------------- | ------------------------ | -------------------- | --------------------------------------------------------------------- |
+| `status`          | main → renderer          | 主进程任意时刻              | 启动进度文字                                                                |
+| `retry`           | renderer → main          | error.html "重试" 按钮   | 主进程 stop → 重新加载 loading → 重新启动                                     |
+| `repair-dsh`      | renderer → main (invoke) | error.html "在线修复" 按钮 | 返回 `{ success, cachePath?, error? }`；受 `isRepairing` 互斥锁保护            |
+| `repair-progress` | main → renderer          | repairDsh 进度回调       | 步骤文字（"正在下载..." / "解压完成" 等）                                        |
+| `check-update`    | renderer → main (invoke) | 性能检测 / 调试            | 返回 `{ hasUpdate, currentVersion, latestVersion, error? }`                |
+| `get-app-version` | renderer → main (invoke) | loading.html          | 返回 `app.getVersion()`                                                |
+| `get-installed-version` | renderer → main (invoke) | loading.html       | 返回已安装的 DSH 版本号                                                       |
+| `install-dsh-update` | renderer → main (send) | DSH 更新横幅「更新 DSH」按钮   | 调用 `performUpdate()`；受 `isUpdating` 互斥锁 + 来源白名单保护                      |
+| `install-update`  | renderer → main (send) | 客户端更新横幅「前往下载」按钮       | 弹出确认框后 `shell.openExternal` 打开 GitHub Release 页面；受 `isTrustedSender` 与 `pendingAppUpdateReleaseUrl` 守卫 |
+| `open-external`   | renderer → main (invoke) | DSH UI 中的 GitHub 图标  | 在系统默认浏览器打开 URL；受 `isTrustedSender` 守卫，仅允许 `http(s)` 协议              |
+
+所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external`）的 IPC handler 入口都过 `isTrustedSender(event)`：
+仅允许 `file:`（本地 loading/error 页）或 loopback `http(s)`（DSH 页面）的 senderFrame。防止外部页面或被劫持的 webContents 触发高危操作。
 
 ### 5.5 Preload API（`window.dsh`）
 
-| 方法                     | 返回                                       | 说明                          |
-| ---------------------- | ---------------------------------------- | --------------------------- |
-| `retry()`              | `void`                                   | 通知主进程重试                     |
-| `getErrorInfo()`       | `string`                                 | 读取错误信息（优先 IPC，否则 URL query） |
-| `onStatus(cb)`         | `void`                                   | 订阅状态更新                      |
-| `repairDsh()`          | `Promise<{success, cachePath?, error?}>` | 触发在线修复                      |
-| `onRepairProgress(cb)` | `void`                                   | 订阅修复进度                      |
+| 方法                     | 返回                                       | 说明                              |
+| ---------------------- | ---------------------------------------- | ------------------------------- |
+| `retry()`              | `void`                                   | 通知主进程重试                         |
+| `getErrorInfo()`       | `string`                                 | 读取错误信息（优先 IPC，否则 URL query）   |
+| `onStatus(cb)`         | `void`                                   | 订阅状态更新                          |
+| `repairDsh()`          | `Promise<{success, cachePath?, error?}>` | 触发在线修复                          |
+| `onRepairProgress(cb)` | `void`                                   | 订阅修复进度                          |
+| `checkUpdate()`        | `Promise<UpdateCheckResult>`             | 主动检查 DSH 更新                    |
+| `getInstalledVersion()`| `Promise<string>`                        | 读取 DSH 版本号                    |
+| `getAppVersion()`      | `Promise<string>`                        | 读取桌面应用自身版本号                |
+| `installUpdate()`      | `void`                                   | 触发客户端更新引导（确认后打开 GitHub Release 页面）|
+| `installDshUpdate()`   | `void`                                   | 触发 DSH 运行包更新（切 loading 页执行）  |
+| `openExternal(url)`    | `Promise<{success, error?}>`            | 在系统默认浏览器打开 URL               |
 
 ---
 
@@ -200,10 +220,11 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 ### 6.3 启动命令
 
 ```text
-<内置 node.exe> <DSH 入口脚本> web --port <port>
+<内置 node.exe> <DSH 入口脚本> web --port <port> --no-open
 ```
 
-- 通过 `--port` 显式传端口（DSH 实际不读 `PORT` 环境变量，这条坑在 `dsh-manager.ts:367-369` 注释里有写）。
+- 通过 `--port` 显式传端口（DSH 实际不读 `PORT` 环境变量，这条坑在 `dsh-manager.ts` 注释里有写）。
+- **必须传 `--no-open`**。DSH web 启动器（`@deepseek-ai/dsh-web-app` 0.1.1-rc.2 起）默认会在服务 ready 后通过 `open` npm 包打开系统默认浏览器。这条调用链发生在 DSH 子进程自己 fork 的进程里，完全不走 Electron webContents，主进程现有的 `setWindowOpenHandler` 拦不到。`--no-open` 由 web 启动器的 commander 解析，把 `webStartup.openBrowser` 设为 `false`，子进程就不会调 `open` 包，系统浏览器不会被自动打开，UI 由 `BrowserWindow.loadURL` 加载。
 - 设置独立的 `npm_config_cache` / `npm_config_prefix` 到 `%LOCALAPPDATA%/DSH Desktop/npm-cache/`，避免继承系统全局配置触发 EPERM。
 
 ### 6.4 用户可写缓存目录
@@ -214,6 +235,20 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `%LOCALAPPDATA%/DSH Desktop/npm-cache/` | 运行时 npm/npx 缓存（必须可写，因为 `resources/node/` 在 `Program Files` 下是只读） |
 
 两个目录都在用户级，跨应用启动复用，卸载应用不自动删除。
+
+### 6.5 桌面应用客户端更新架构
+
+| 项     | 说明                                                                                                    |
+| ----- | ----------------------------------------------------------------------------------------------------- |
+| 更新源   | 仅 GitHub（`https://github.com/ycowner/deepseek-harness-desktop/releases`）                                  |
+| 检测方式  | `src/main/app-update.ts` 手写 GitHub releases/latest API（`fetchGitHubLatest` → `checkForGitHubAppUpdate`）      |
+| 更新方式  | **不自动下载安装**：检测到新版本后主进程弹确认框，`shell.openExternal` 打开 GitHub Release 页面，由用户手动下载安装包完成更新          |
+| 守卫    | 版本号经 `isValidVersion` 校验；Release URL 白名单校验必须为 `https://github.com/` 前缀；`install-update` IPC 过 `isTrustedSender` |
+| 遗留清理  | `cleanupLegacyInstallers()` 启动时一次性清理历史版本下载到安装目录的安装包                                                      |
+
+自 1.0.3 起移除 electron-updater 与 Gitee 回退源（原自动下载 + sha512 校验 + spawn 安装链路全部下线）。`electron-builder.yml` 不再配置 `publish` 段，打包不再生成 `resources/app-update.yml`。
+
+发布流程配套要求：GitHub 每个 release 的 **tag 必须以 `v` 开头**（如 `v1.0.3`，与 `app-update.ts` 的 `tag_name` 解析规则一致），并上传 `DSH-Desktop-Setup-<version>.exe` 安装包。
 
 ---
 
@@ -244,8 +279,43 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
   - `dsh-bundled/`（预装 DSH 包，已排除 d.ts）
   - `icon.ico`（窗口图标，主进程通过 `process.resourcesPath/icon.ico` 读取）
 - 安装包：NSIS、`perMachine: true`、`oneClick: false`、`allowToChangeInstallationDirectory: true`
-- 安装包命名：`DSH-Desktop-Setup-<version>.exe`（`artifactName` 连字符格式，与 `src/main/app-update.ts` 的检测模板一致；检测逻辑会宽松归一化空格为连字符，兼容空格命名）
+- 安装包命名：`DSH-Desktop-Setup-<version>.exe`（`artifactName` 连字符格式，避免上传平台对空格的处理）
+- 发布配置：不再使用 `publish` 段（原 electron-updater 自动更新已移除，不生成 `app-update.yml`）；GitHub Release 是用户手动下载的唯一渠道，每个 release 上传 `DSH-Desktop-Setup-<version>.exe` 即可。
 - 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 146MB。
+
+### 8.1 任务栏固定图标保留（NSIS 跨升级）
+
+升级时务必保留 Start Menu 快捷方式与 AppUserModelID 注册表项，否则 Windows 任务栏上已被用户“固定”的 DSH Desktop 图标会被当作失效条目清理掉。机制由 **electron-builder 25 NSIS 模板自带**的三段逻辑提供，本仓库负责「为它供能量」：
+
+1. **首次安装**时，electron-builder NSIS 模板会在 `installer.nsh` 的 `registryAddInstallInfo` 宏中执行 `WriteRegStr SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" "KeepShortcuts" "true"`，给本机抢下跨升级追踪凭证。
+2. **升级**时，新安装器读上一版本写入的 `KeepShortcuts=true`，并在调旧 `Uninstaller.exe` 时追附 `--keep-shortcuts`。另需一个隐藏前提：新安装器自身接收到的 CLI 参数里必须包含 `--updated`（让模板里的 ${isUpdated} 为真），否则 `setIsTryToKeepShortcuts` 会把 $isTryToKeepShortcuts 置回 false，进而 --keep-shortcuts 不会被附加。
+3. **旧 Uninstaller.exe** 在收到 `--keep-shortcuts` 后，会跳过 `Delete "$SMPROGRAMS\DSH Desktop.lnk"` 与 `WinShell::UninstAppUserModelId "${APP_ID}"` 两条，Start Menu 与 HKLM\SOFTWARE\Classes\AppUserModelID\com.dsh.desktop 双锚点都保留。
+
+自 1.0.3 起应用内不再自动安装（原 electron-updater 与 Gitee 回退源均移除，无 `--updated` 传递路径）：
+
+- 用户从 GitHub Release 页面**手动下载安装包双击升级**时，安装器不会收到 `--updated` 参数，NSIS 模板的 keep-shortcuts 链路不会激活，任务栏已固定图标可能丢失（已知限制，升级后重新固定即可）。
+
+附加护栏（与本机制互绑）：
+
+- `electron-builder.yml` 的 `nsis.deleteAppDataOnUninstall: false`：本项目默认即为 false，显式写出来避免被误调为 true。
+- `build/installer.nsh`：仅作为文档与未来扩展点使用，不覆盖模板默认行为。
+- `src/main/index.ts` 的 `app.setAppUserModelId('com.dsh.desktop')` **必须在 `app.whenReady().then(...)` resolve 之前**调用，符合 Electron 官方契约，为运行时提供稳定的 AppUserModelID 关联。
+
+调试时验证点（仅 Windows 用户机进行）：
+
+1. 首次安装 1.0.x，启动后手动“固定到任务栏”。
+2. 用 `DSH Desktop Setup 1.0.(x+1).exe --updated` 命令行方式模拟升级（手动双击不带 `--updated` 时图标保留链路不激活，属已知限制）。
+3. 重启后期望：任务栏上原有图标仍在原位、能点开成功。
+
+#### 8.1.1 应用图标变更发版阻断
+
+`build/icon.ico` 是用户任务栏固定图标的二进制唯一底层资源（`electron-builder` 据此生成 `.exe` 的 Win32 资源、`installerIcon` / `uninstallerIcon`、以及快捷方式 `.lnk` 的嵌入图标 Hash）。**更换此文件仅作为发版阻断项处理**，不在常规 PR 范围中：
+
+- `build/icon.ico` 在补 PR 范围内严禁替换；需要换图标必须独立发版分支，可能将触发用户任务栏固定图标的视觉刷新（但仍以一致身份刷新，不会丢失固定位置）。
+- `scripts/generate-icon.js` 是该文件的唯一生成入口，仅限于专为发布而启用的脚本调用。
+- `resources/icon.ico` 是打包后运行时被 `BrowserWindow.icon` 读取的窗口图标，由 `electron-builder.yml` 的 `extraResources` 从 `build/icon.ico` 打包而来，同时与该入口保持同步，不要独立修改。
+
+社区背景：electron-builder issue [#2514](https://github.com/electron-userland/electron-builder/issues/2514) 、[#926](https://github.com/electron-userland/electron-builder/issues/926) 与 PR [#5312](https://github.com/electron-userland/electron-builder/pull/5312) 说明该问题在上游仅覆盖了桌面快捷方式的边缘场景；历史上本仓库是通过「传 `--updated`」走出一条未必经上游显式支持的路径，在跨升级下仍能保留任务栏固定图标。自 1.0.3 起应用内自动更新移除后，该机制仅在安装器带 `--updated` 参数运行时生效。
 
 **修改打包配置后必须验证**：
 
@@ -341,6 +411,33 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
     - 都是构建产物，源码在 `src/` 和 `scripts/`。
 11. **不要把缓存目录从 `%LOCALAPPDATA%/DSH Desktop/` 改成系统级路径**。
     - `resources/node/` 装在 `Program Files` 下是只读，运行时缓存必须用户可写。
+12. **不要去掉 `dsh-manager.ts` spawn 参数里的 `--no-open`**。
+    - DSH web 启动器默认会在服务 ready 后通过 `open` npm 包打开系统默认浏览器。这条调用链发生在 DSH 子进程自己 fork 的进程里，完全不走 Electron webContents，主进程现有的 `setWindowOpenHandler` 拦不到。
+    - 去掉 `--no-open` 会导致用户启动桌面应用时同时弹出系统默认浏览器，破坏"只开 Electron 窗口"的产品行为。
+    - 加回非常容易（`grep '\\-\\-no-open' src/main/dsh-manager.ts`），但回退前先确认用户体验影响。
+13. **不要在 `performUpdate()` 里先 `stopDsh` 再 `prepareDshPackage`**。
+    - 顺序约束：`prepare`（下载+完整性校验+安装到 staging）→ `stopDsh`（释放缓存目录锁）→ `activate`（rm 旧缓存 + rename staging，毫秒级窗口）→ `startDsh`。颠倒顺序会导致 Windows 下 `rmSync(targetDir)` 遇到运行中的 native 模块（node-pty 等 .node 文件）抛 EPERM，更新必然失败。
+    - 同样，`repairDsh`（错误页流程）只能用于 DSH 未运行的场景；运行中版本更新必须手动调用 `prepare` + `activate`。
+14. **不要绕过 `isUpdating` / `isRepairing` 互斥锁直接调用更新/修复流程**。
+    - 共享 staging / target 目录的并发调用会互踩（`rmSync`/`renameSync` 互相干扰），造成缓存损坏。双击更新横幅、错误页重复点修复按钮都可能产生并发。
+15. **不要将远端版本号直接拼入文件路径 / URL / JS 模板**。
+    - 远端 `tag_name` 拼接前必须过 `isValidVersion()` 白名单（`/^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$/`）。这是纵深防御，git 标签命名规则是第一道防线；手动检查不要跳过。
+16. **不要让 IPC handler 脱离 `isTrustedSender(event)` 校验**。
+    - 敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external`）必须限制 senderFrame 为 `file:` 或 loopback `http(s)`，防止被劫持的 webContents 或外部页面触发高危操作。
+17. **不要拆掉 `dsh-repair.ts` 的两阶段函数导出**。
+    - `prepareDshPackage` / `activateDshPackage` / `repairDsh` 是有约束的三件套。`performUpdate`（DSH 运行中场景）必须分别调用前两者，错误页场景才能调用 `repairDsh`（一步到位）。
+18. **不要将远程请求改回 Node `https.get`**。
+    - 所有远程请求（registry / tgz 下载 / latest.yml / 安装包）已统一改用 Electron `net.fetch`：自动遵循系统代理、自动跟随重定向。回退到 Node `https.get` 会失去代理支持并要手写重定向状态机。loopback 健康探测（`dsh-manager.checkUrl`）是例外，必须用 Node `http.get`，避免 127.0.0.1 被代理规则劫持。
+19. **不要删除 Gitee 升级路径 `spawn(...)` 中的 `--updated` 参数**。
+    - electron-builder 25 NSIS 模板允许跨升级保留任务栏固定图标，依赖两条条件同时成立：
+      a) 注册表里上一版本写入的 `KeepShortcuts=true`；
+      b) 新安装器接收到 `--updated` 标志，使 NSIS 宏 ${isUpdated} 为真。
+    - 跳过 `--updated` 会导致 `setIsTryToKeepShortcuts` 将 $isTryToKeepShortcuts 置回 false，进而旧 `Uninstaller.exe` 不会收到 `--keep-shortcuts`，旧安装路径下的 `Delete "$SMPROGRAMS\DSH Desktop.lnk"` 与 `WinShell::UninstAppUserModelId` 会依次执行，Windows 任务栏上用户“固定”的图标会丢失。
+    - 当前设置：[`src/main/index.ts`](src/main/index.ts) 的 `performAppUpdate()` Gitee 分支必须保持 `spawn(installerPath, ['--updated', '--keep-shortcuts'], { detached: true, stdio: 'ignore' })`。同步迁移到 electron-updater 主源路径 ([`node_modules/electron-updater/out/NsisUpdater.js:107`](node_modules/electron-updater/out/NsisUpdater.js) `const args = ["--updated"]`) 同样需保留这两个参数。
+    - `electron-builder.yml` 中 `nsis.uninstallBeforeInstall` 不是合法选项（不在 electron-builder 25 `NsisOptions` 中）。不要“补”这个选项。
+20. **不要在补 PR 中替换 `build/icon.ico`**。
+    - `build/icon.ico` 是 .exe 的 Win32 资源、`installerIcon`/`uninstallerIcon`、以及任务栏固定图标嵌入资源的唯一底层来源。替换它会冻结 [§8.1.1](AGENTS.md) 描述的三处同步点。
+    - 需要换图标必须独立发版分支。同一发版周期内 `build/icon.ico` 与 `resources/icon.ico` 保持双向同步；不要只改 `build/icon.ico`，也不要手动改 `resources/icon.ico`。
 
 ### 12.2 改之前要确认
 

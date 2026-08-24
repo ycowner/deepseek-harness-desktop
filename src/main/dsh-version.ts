@@ -1,4 +1,4 @@
-import { get } from 'https'
+import { net } from 'electron'
 import { join, dirname, resolve as resolvePath } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import { findCachedDshEntry } from './dsh-manager'
@@ -14,7 +14,48 @@ import { findCachedDshEntry } from './dsh-manager'
 
 // npm registry 地址
 const NPM_REGISTRY = 'https://registry.npmjs.org'
+// 国内镜像（阿里云 npmmirror），优先使用，失败回退到 NPM_REGISTRY
+const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
+
+// 远程请求超时（毫秒）
+const REQUEST_TIMEOUT = 30_000
+
+/**
+ * 版本号白名单校验（semver core + 可选预发布标签）
+ *
+ * 远端版本号在进入文件路径 / URL / 注入 JS 模板前必须通过此校验，
+ * 防止路径穿越与模板注入（纵深防御；git 标签命名规则是第一道防线）
+ */
+export function isValidVersion(v: string): boolean {
+  return /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(v)
+}
+
+/**
+ * 通过 Electron net 模块请求 JSON（Chromium 网络栈，自动遵循系统代理）
+ *
+ * fetch 语义自动跟随重定向。仅用于远程 registry 请求；
+ * loopback 健康探测仍使用 Node http（见 dsh-manager.checkUrl），
+ * 避免 127.0.0.1 被系统代理规则劫持。
+ */
+async function fetchJson(url: string, headers?: Record<string, string>): Promise<unknown> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
+  try {
+    const res = await net.fetch(url, { headers, signal: controller.signal })
+    if (!res.ok) {
+      throw new Error(`请求失败 (状态码 ${res.status})`)
+    }
+    return await res.json()
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`请求超时（${REQUEST_TIMEOUT / 1000}秒）`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /**
  * 版本检查结果
@@ -78,6 +119,7 @@ export function getInstalledDshVersion(): string {
 /**
  * 从 npm registry 获取最新版本号
  *
+ * 优先使用国内镜像（npmmirror），失败回退到 npm registry（npmjs.org）。
  * 读取包的 dist-tags，取所有标签指向版本中的最大版本号。
  * 原因：@deepseek-ai/dsh 的预发布版本可能发布在 `next` 等标签而非 `latest`，
  * 仅读 `/latest` 会漏检（如 0.1.0-rc.8 发布在 next 标签时）。
@@ -85,50 +127,57 @@ export function getInstalledDshVersion(): string {
  * @returns 版本号字符串，如 "1.2.3"
  */
 export function fetchLatestVersion(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // 轻量 dist-tags 接口：https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags
-    const url = `${NPM_REGISTRY}/-/package/${encodeURIComponent(DSH_PACKAGE).replace('%40', '@')}/dist-tags`
-    // 注意：npm registry 对 scoped 包路径要求 @ 不编码
-    const req = get(url, (res) => {
-      // 处理重定向
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        get(res.headers.location, (r2) => {
-          if (r2.statusCode !== 200) {
-            reject(new Error(`获取版本失败 (重定向后状态码 ${r2.statusCode})`))
-            return
-          }
-          let data = ''
-          r2.on('data', (chunk: Buffer) => (data += chunk.toString()))
-          r2.on('end', () => {
-            try {
-              resolve(pickLatestFromDistTags(JSON.parse(data)))
-            } catch (e) {
-              reject(new Error(`解析版本响应失败: ${(e as Error).message}`))
-            }
-          })
-        }).on('error', reject)
-        return
-      }
-      if (res.statusCode !== 200) {
-        reject(new Error(`获取版本失败 (状态码 ${res.statusCode})`))
-        return
-      }
-      let data = ''
-      res.on('data', (chunk: Buffer) => (data += chunk.toString()))
-      res.on('end', () => {
-        try {
-          resolve(pickLatestFromDistTags(JSON.parse(data)))
-        } catch (e) {
-          reject(new Error(`解析版本响应失败: ${(e as Error).message}`))
-        }
-      })
+  return fetchLatestVersionFromRegistry(NPM_REGISTRY_MIRROR)
+    .catch((mirrorErr) => {
+      console.warn(`[DSH] 国内镜像查询版本失败，回退到 npm registry: ${mirrorErr.message}`)
+      return fetchLatestVersionFromRegistry(NPM_REGISTRY)
     })
-    req.on('error', reject)
-    req.setTimeout(30_000, () => {
-      req.destroy()
-      reject(new Error('获取版本超时（30秒）'))
+}
+
+/**
+ * 从指定 registry 获取最新版本号（内部实现）
+ *
+ * @param registry registry 根地址，如 'https://registry.npmmirror.com'
+ * @returns 版本号字符串
+ */
+function fetchLatestVersionFromRegistry(registry: string): Promise<string> {
+  // 轻量 dist-tags 接口：https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags
+  const url = `${registry}/-/package/${encodeURIComponent(DSH_PACKAGE).replace('%40', '@')}/dist-tags`
+  // 注意：npm registry 对 scoped 包路径要求 @ 不编码
+  return fetchJson(url).then((data) => pickLatestFromDistTags(data as Record<string, unknown>))
+}
+
+/**
+ * 获取指定版本 DSH 包的 dist.integrity（sha512，base64）
+ *
+ * 使用 abbreviated packument（Accept: application/vnd.npm.install-v1+json），
+ * 体积远小于完整 packument；npmmirror 与 npmjs 均支持该格式。
+ * 优先国内镜像，失败回退 npm registry。
+ *
+ * @param version 版本号，如 "1.2.3"
+ * @returns integrity 字符串，形如 "sha512-<base64>"；缺失时抛异常
+ */
+export function fetchDistIntegrity(version: string): Promise<string> {
+  return fetchDistIntegrityFromRegistry(NPM_REGISTRY_MIRROR, version)
+    .catch((mirrorErr) => {
+      console.warn(`[DSH] 国内镜像查询包完整性失败，回退到 npm registry: ${mirrorErr.message}`)
+      return fetchDistIntegrityFromRegistry(NPM_REGISTRY, version)
     })
-  })
+}
+
+/**
+ * 从指定 registry 获取指定版本的 dist.integrity（内部实现）
+ */
+async function fetchDistIntegrityFromRegistry(registry: string, version: string): Promise<string> {
+  const url = `${registry}/${encodeURIComponent(DSH_PACKAGE).replace('%40', '@')}`
+  const data = (await fetchJson(url, { Accept: 'application/vnd.npm.install-v1+json' })) as {
+    versions?: Record<string, { dist?: { integrity?: string } }>
+  }
+  const integrity = data.versions?.[version]?.dist?.integrity
+  if (!integrity) {
+    throw new Error(`未找到 ${DSH_PACKAGE}@${version} 的 dist.integrity`)
+  }
+  return integrity
 }
 
 /**
@@ -197,8 +246,8 @@ export function compareVersions(v1: string, v2: string): number {
     // 数字段比数值，非数字段比字符串
     const aNum = parseInt(a, 10)
     const bNum = parseInt(b, 10)
-    const aIsNum = !isNaN(aNum).toString()
-    const bIsNum = !isNaN(bNum).toString()
+    const aIsNum = !isNaN(aNum)
+    const bIsNum = !isNaN(bNum)
     if (aIsNum !== bIsNum) {
       // 类型不同时，数字段 < 字符串段（semver 规范）
       return isNaN(aNum) ? 1 : -1
