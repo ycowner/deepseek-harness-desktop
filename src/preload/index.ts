@@ -60,6 +60,10 @@ const api = {
   // 返回 openExternal 结果：成功时 success 为 true，失败时包含 error 信息
   openExternal: (url: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('open-external', url)
+  },
+  // 触发手动检查更新菜单（主进程弹 dialog 让用户选择检查 DSH 运行包 / 客户端 / 全部）
+  showUpdateMenu: (): void => {
+    ipcRenderer.send('show-update-menu')
   }
 }
 

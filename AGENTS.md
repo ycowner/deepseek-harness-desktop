@@ -121,7 +121,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │  │                       → 服务就绪后 loadURL(dsh URL)      │
 │  ├── IPC 路由  ──► 'status' / 'retry' / 'repair-dsh' / 'install-dsh-update'   │
 │  │                'install-update' / 'check-update' / 'get-app-version'      │
-│  │                'get-installed-version' / 'open-external'                 │
+│  │                'get-installed-version' / 'open-external' / 'show-update-menu'│
 │  ├── 客户端更新  ──► GitHub releases API 检测 → 引导打开 Release 页面手动下载 │
 │  └── 子进程管理 ──► spawn(内置 node.exe + 缓存的 DSH 入口)   │
 │                                                             │
@@ -177,8 +177,9 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `install-dsh-update` | renderer → main (send) | DSH 更新横幅「更新 DSH」按钮   | 调用 `performUpdate()`；受 `isUpdating` 互斥锁 + 来源白名单保护                      |
 | `install-update`  | renderer → main (send) | 客户端更新横幅「前往下载」按钮       | 弹出确认框后 `shell.openExternal` 打开 GitHub Release 页面；受 `isTrustedSender` 与 `pendingAppUpdateReleaseUrl` 守卫 |
 | `open-external`   | renderer → main (invoke) | DSH UI 中的 GitHub 图标  | 在系统默认浏览器打开 URL；受 `isTrustedSender` 守卫，仅允许 `http(s)` 协议              |
+| `show-update-menu`| renderer → main (send) | DSH UI 右上角「检查更新」图标 | 弹原生 dialog 让用户选择检查项（DSH 运行包 / 客户端 / 全部），串行执行手动检查；受 `isCheckingUpdate` 互斥锁 + `isTrustedSender` 守卫 |
 
-所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external`）的 IPC handler 入口都过 `isTrustedSender(event)`：
+所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external` / `show-update-menu`）的 IPC handler 入口都过 `isTrustedSender(event)`：
 仅允许 `file:`（本地 loading/error 页）或 loopback `http(s)`（DSH 页面）的 senderFrame。防止外部页面或被劫持的 webContents 触发高危操作。
 
 ### 5.5 Preload API（`window.dsh`）
@@ -196,6 +197,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `installUpdate()`      | `void`                                   | 触发客户端更新引导（确认后打开 GitHub Release 页面）|
 | `installDshUpdate()`   | `void`                                   | 触发 DSH 运行包更新（切 loading 页执行）  |
 | `openExternal(url)`    | `Promise<{success, error?}>`            | 在系统默认浏览器打开 URL               |
+| `showUpdateMenu()`     | `void`                                   | 触发手动检查更新菜单（主进程弹 dialog 选择检查项）|
 
 ---
 
