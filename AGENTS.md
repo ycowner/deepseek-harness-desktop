@@ -289,27 +289,34 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 升级时务必保留 Start Menu 快捷方式与 AppUserModelID 注册表项，否则 Windows 任务栏上已被用户“固定”的 DSH Desktop 图标会被当作失效条目清理掉。机制由 **electron-builder 25 NSIS 模板自带**的三段逻辑提供，本仓库负责「为它供能量」：
 
-1. **首次安装**时，electron-builder NSIS 模板会在 `installer.nsh` 的 `registryAddInstallInfo` 宏中执行 `WriteRegStr SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" "KeepShortcuts" "true"`，给本机抢下跨升级追踪凭证。
-2. **升级**时，新安装器读上一版本写入的 `KeepShortcuts=true`，并在调旧 `Uninstaller.exe` 时追附 `--keep-shortcuts`。另需一个隐藏前提：新安装器自身接收到的 CLI 参数里必须包含 `--updated`（让模板里的 ${isUpdated} 为真），否则 `setIsTryToKeepShortcuts` 会把 $isTryToKeepShortcuts 置回 false，进而 --keep-shortcuts 不会被附加。
+1. **首次安装**时，electron-builder NSIS 模板会在 `installer.nsh` 的 `registryAddInstallInfo` 宏中执行 `WriteRegStr SHELL_CONTEXT "${INSTALL_REGISTRY_KEY}" "KeepShortcuts" "true"`，给本机抢下跨升级追踪凭证（历史 1.0.x 安装均已写入）。
+2. **升级**时，新安装器读上一版本写入的 `KeepShortcuts=true`，并在调旧 `Uninstaller.exe` 时追附 `--keep-shortcuts`。隐藏前提是模板里的 ${isUpdated} 为真，否则 `setIsTryToKeepShortcuts` 会把 $isTryToKeepShortcuts 置回 false。
 3. **旧 Uninstaller.exe** 在收到 `--keep-shortcuts` 后，会跳过 `Delete "$SMPROGRAMS\DSH Desktop.lnk"` 与 `WinShell::UninstAppUserModelId "${APP_ID}"` 两条，Start Menu 与 HKLM\SOFTWARE\Classes\AppUserModelID\com.dsh.desktop 双锚点都保留。
 
-自 1.0.3 起应用内不再自动安装（原 electron-updater 与 Gitee 回退源均移除，无 `--updated` 传递路径）：
+#### 8.1.1 ${isUpdated} 的编译期重定义（方案 B'，自 1.0.5 起）
 
-- 用户从 GitHub Release 页面**手动下载安装包双击升级**时，安装器不会收到 `--updated` 参数，NSIS 模板的 keep-shortcuts 链路不会激活，任务栏已固定图标可能丢失（已知限制，升级后重新固定即可）。
+自 1.0.3 起应用内不再自动安装（原 electron-updater 与 Gitee 回退源均移除，安装器失去 `--updated` 传递路径），手动双击升级时 keep-shortcuts 链路断裂、固定图标丢失。**修复**：`build/installer.nsh` 在编译期重定义了 `${isUpdated}` 的语义（强耦合 electron-builder 25 模板实现，升级 electron-builder 必须重新验证）：
+
+- 新语义 = 「CLI 带 `--updated`」或「存在旧安装（HKLM `Software\<APP_GUID>\InstallLocation`）且已进入安装执行阶段」。
+- 阶段分界：页面阶段（目录选择页 `skipPageIfUpdated`）拿到 false → 目录页正常显示且预填旧安装目录（可改目录，支持 `/D`）；安装执行阶段（`setIsTryToKeepShortcuts` / `uninstallOldVersion` / `CHECK_APP_RUNNING`）拿到 true → keep-shortcuts 激活，升级时自动结束运行中的应用（与 electron-updater 行为一致）。
+- 阶段标记：非静默由 `customPageAfterChangeDir` 注入的空页面（目录页后、instfiles 前，`Abort` 跳过无 UI）置位；静默 `/S` 由 `customInit` 的 `${Silent}` 分支置位。
+- 卸载器 pass 中两个标记 Var 为空串，`${isUpdated}` 退化为纯 CLI 检测，手动卸载行为与默认模板一致。
+- 伴随行为（已确认接受）：升级后不重建用户已手动删除的桌面快捷方式。
+- 注意：旧文件中的 `NSIS_HOOK_PREINSTALL/POSTINSTALL/PREUNINSTALL` 是从未生效的死代码（electron-builder 25 无任何引用点）已删除；模板真正支持的钩子是 `customInit` / `customInstall` / `customUnInstall` / `customPageAfterChangeDir` / `preInit` 等。
 
 附加护栏（与本机制互绑）：
 
 - `electron-builder.yml` 的 `nsis.deleteAppDataOnUninstall: false`：本项目默认即为 false，显式写出来避免被误调为 true。
-- `build/installer.nsh`：仅作为文档与未来扩展点使用，不覆盖模板默认行为。
+- `build/installer.nsh`：承载 §8.1.1 的 `${isUpdated}` 重定义与阶段标记机制（方案 B'），是固定图标保留链路的能量来源，不是纯文档文件。
 - `src/main/index.ts` 的 `app.setAppUserModelId('com.dsh.desktop')` **必须在 `app.whenReady().then(...)` resolve 之前**调用，符合 Electron 官方契约，为运行时提供稳定的 AppUserModelID 关联。
 
 调试时验证点（仅 Windows 用户机进行）：
 
 1. 首次安装 1.0.x，启动后手动“固定到任务栏”。
-2. 用 `DSH Desktop Setup 1.0.(x+1).exe --updated` 命令行方式模拟升级（手动双击不带 `--updated` 时图标保留链路不激活，属已知限制）。
-3. 重启后期望：任务栏上原有图标仍在原位、能点开成功。
+2. 双击新版本安装包手动升级（无需任何 CLI 参数，方案 B' 会自动识别升级场景），若 DSH Desktop 正在运行会被自动结束。
+3. 升级后重启期望：任务栏上原有图标仍在原位、能点开成功；升级过程中目录选择页正常显示且预填旧目录。
 
-#### 8.1.1 应用图标变更发版阻断
+#### 8.1.2 应用图标变更发版阻断
 
 `build/icon.ico` 是用户任务栏固定图标的二进制唯一底层资源（`electron-builder` 据此生成 `.exe` 的 Win32 资源、`installerIcon` / `uninstallerIcon`、以及快捷方式 `.lnk` 的嵌入图标 Hash）。**更换此文件仅作为发版阻断项处理**，不在常规 PR 范围中：
 
@@ -317,7 +324,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 - `scripts/generate-icon.js` 是该文件的唯一生成入口，仅限于专为发布而启用的脚本调用。
 - `resources/icon.ico` 是打包后运行时被 `BrowserWindow.icon` 读取的窗口图标，由 `electron-builder.yml` 的 `extraResources` 从 `build/icon.ico` 打包而来，同时与该入口保持同步，不要独立修改。
 
-社区背景：electron-builder issue [#2514](https://github.com/electron-userland/electron-builder/issues/2514) 、[#926](https://github.com/electron-userland/electron-builder/issues/926) 与 PR [#5312](https://github.com/electron-userland/electron-builder/pull/5312) 说明该问题在上游仅覆盖了桌面快捷方式的边缘场景；历史上本仓库是通过「传 `--updated`」走出一条未必经上游显式支持的路径，在跨升级下仍能保留任务栏固定图标。自 1.0.3 起应用内自动更新移除后，该机制仅在安装器带 `--updated` 参数运行时生效。
+社区背景：electron-builder issue [#2514](https://github.com/electron-userland/electron-builder/issues/2514) 、[#926](https://github.com/electron-userland/electron-builder/issues/926) 与 PR [#5312](https://github.com/electron-userland/electron-builder/pull/5312) 说明该问题在上游仅覆盖了桌面快捷方式的边缘场景；历史上本仓库是通过「传 `--updated`」走出一条未必经上游显式支持的路径，在跨升级下仍能保留任务栏固定图标。自 1.0.3 起应用内自动更新移除后，`--updated` 传递路径断裂；1.0.5 起改由 §8.1.1 的编译期重定义方案在安装器内部重建该链路，手动双击升级不再依赖任何 CLI 参数。
 
 **修改打包配置后必须验证**：
 
@@ -430,15 +437,16 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
     - `prepareDshPackage` / `activateDshPackage` / `repairDsh` 是有约束的三件套。`performUpdate`（DSH 运行中场景）必须分别调用前两者，错误页场景才能调用 `repairDsh`（一步到位）。
 18. **不要将远程请求改回 Node `https.get`**。
     - 所有远程请求（registry / tgz 下载 / latest.yml / 安装包）已统一改用 Electron `net.fetch`：自动遵循系统代理、自动跟随重定向。回退到 Node `https.get` 会失去代理支持并要手写重定向状态机。loopback 健康探测（`dsh-manager.checkUrl`）是例外，必须用 Node `http.get`，避免 127.0.0.1 被代理规则劫持。
-19. **不要删除 Gitee 升级路径 `spawn(...)` 中的 `--updated` 参数**。
-    - electron-builder 25 NSIS 模板允许跨升级保留任务栏固定图标，依赖两条条件同时成立：
-      a) 注册表里上一版本写入的 `KeepShortcuts=true`；
-      b) 新安装器接收到 `--updated` 标志，使 NSIS 宏 ${isUpdated} 为真。
-    - 跳过 `--updated` 会导致 `setIsTryToKeepShortcuts` 将 $isTryToKeepShortcuts 置回 false，进而旧 `Uninstaller.exe` 不会收到 `--keep-shortcuts`，旧安装路径下的 `Delete "$SMPROGRAMS\DSH Desktop.lnk"` 与 `WinShell::UninstAppUserModelId` 会依次执行，Windows 任务栏上用户“固定”的图标会丢失。
-    - 当前设置：[`src/main/index.ts`](src/main/index.ts) 的 `performAppUpdate()` Gitee 分支必须保持 `spawn(installerPath, ['--updated', '--keep-shortcuts'], { detached: true, stdio: 'ignore' })`。同步迁移到 electron-updater 主源路径 ([`node_modules/electron-updater/out/NsisUpdater.js:107`](node_modules/electron-updater/out/NsisUpdater.js) `const args = ["--updated"]`) 同样需保留这两个参数。
+19. **不要拆掉 `build/installer.nsh` 里的 `${isUpdated}` 重定义与阶段标记机制**。
+    - 任务栏固定图标跨升级保留（[§8.1.1](AGENTS.md)）依赖 electron-builder 25 NSIS 模板的两条条件同时成立：
+      a) 注册表里上一版本写入的 `KeepShortcuts=true`（模板 `registryAddInstallInfo` 自动写入）；
+      b) 新安装器内 `${isUpdated}` 为真，使 `setIsTryToKeepShortcuts` 保持 `$isTryToKeepShortcuts=true`，进而在调旧 `Uninstaller.exe` 时追加 `--keep-shortcuts`。
+    - 条件 b) 原本靠「安装器收到 `--updated` CLI 参数」满足；1.0.3 移除自动更新后该路径断裂，1.0.5 起改由 `build/installer.nsh` 的方案 B'（`_isDshUpdated` 宏 + `customInit` + `customPageAfterChangeDir` 空页面）在编译期重建。
+    - 拆掉该机制会让 `${isUpdated}` 回退为纯 CLI 检测：手动双击升级时 `$isTryToKeepShortcuts` 被置回 false，旧 `Uninstaller.exe` 收不到 `--keep-shortcuts`，`Delete "$SMPROGRAMS\DSH Desktop.lnk"` 与 `WinShell::UninstAppUserModelId` 会依次执行，任务栏上用户“固定”的图标丢失。
+    - 该机制与 electron-builder 25 模板实现（flags() 生成、LogicLib 测试宏协议、customPageAfterChangeDir 钩子）强耦合：升级 electron-builder 版本后必须重新核对并实机验证。
     - `electron-builder.yml` 中 `nsis.uninstallBeforeInstall` 不是合法选项（不在 electron-builder 25 `NsisOptions` 中）。不要“补”这个选项。
 20. **不要在补 PR 中替换 `build/icon.ico`**。
-    - `build/icon.ico` 是 .exe 的 Win32 资源、`installerIcon`/`uninstallerIcon`、以及任务栏固定图标嵌入资源的唯一底层来源。替换它会冻结 [§8.1.1](AGENTS.md) 描述的三处同步点。
+    - `build/icon.ico` 是 .exe 的 Win32 资源、`installerIcon`/`uninstallerIcon`、以及任务栏固定图标嵌入资源的唯一底层来源。替换它会冻结 [§8.1.2](AGENTS.md) 描述的三处同步点。
     - 需要换图标必须独立发版分支。同一发版周期内 `build/icon.ico` 与 `resources/icon.ico` 保持双向同步；不要只改 `build/icon.ico`，也不要手动改 `resources/icon.ico`。
 
 ### 12.2 改之前要确认
