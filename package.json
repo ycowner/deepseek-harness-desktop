@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-desktop",
-  "version": "1.0.4",
+  "version": "1.0.5-beta.1",
   "description": "DeepSeek Harness Web 桌面客户端",
   "main": "dist/main/index.js",
   "scripts": {
