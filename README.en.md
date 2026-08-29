@@ -305,6 +305,6 @@ The bundled `@deepseek-ai/dsh` package follows its upstream license (see `THIRD_
 
 - Upstream DSH: <https://github.com/deepseek-ai/deepseek-harness>
 - Upstream DSH (中文): <https://github.com/deepseek-ai/deepseek-harness/blob/master/README.zh.md>
-- DSH project site: <https://deepseekdsh.com/>
+- DSH project site: <https://www.deepseek.com/harness/>
 - This repository: <https://github.com/ycowner/deepseek-harness-desktop>
 - Team: 零物实验室 (Lingwu Lab)

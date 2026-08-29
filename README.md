@@ -305,6 +305,6 @@ taskkill /pid <pid> /f /t
 
 - 上游 DSH 仓库：<https://github.com/deepseek-ai/deepseek-harness>
 - 上游 DSH 中文 README：<https://github.com/deepseek-ai/deepseek-harness/blob/master/README.zh.md>
-- DSH 项目主页：<https://deepseekdsh.com/>
+- DSH 项目主页：<https://www.deepseek.com/harness/>
 - 本仓库：<https://github.com/ycowner/deepseek-harness-desktop>
 - 团队：零物实验室
