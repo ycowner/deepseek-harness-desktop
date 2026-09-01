@@ -35,7 +35,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | 内置运行时 | Node.js v22.19.0 LTS（Windows x64，zip 包形式内置到 `resources/node/`） |
 | 子进程   | `child_process.spawn`（DSH 跑在独立子进程，与 Electron 主进程隔离）            |
 
-**架构形态**：经典 Electron 三段式（main / preload / renderer），渲染层是**多页面**（`loading.html` + `error.html`），DSH Web UI 通过 `BrowserWindow.loadURL()` 直接加载远程 127.0.0.1 服务，不经过 Vite bundle。
+**架构形态**：经典 Electron 三段式（main / preload / renderer），渲染层是**多页面**（`titlebar.html` + `loading.html` + `error.html`）；窗口为自定义标题栏（WCO，`titleBarStyle: 'hidden'` + `titleBarOverlay`，标题栏页面加载于主 webContents，内容页加载于 `dshView` WebContentsView 子视图）；DSH Web UI 通过 `dshView.webContents.loadURL()` 直接加载远程 127.0.0.1 服务，不经过 Vite bundle。
 
 ---
 
@@ -62,15 +62,17 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   └── png-to-ico.ps1
 ├── src/
 │   ├── main/                    ← 主进程
-│   │   ├── index.ts             ← 应用入口、窗口、IPC 路由、客户端更新引导
+│   │   ├── index.ts             ← 应用入口、窗口（WCO 标题栏 + 内容子视图）、IPC 路由、帮助菜单、模态框注入
 │   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）
 │   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare staging / activate）
 │   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询
 │   │   ├── app-update.ts        ← 客户端更新 GitHub 检测（Release 页面引导、遗留安装包清理）
+│   │   ├── changelog.ts         ← 更新日志获取（上/本项目 GitHub Releases）+ 安全 markdown 渲染
 │   │   └── node-binary.ts       ← 内置 Node 二进制路径解析
 │   ├── preload/
 │   │   └── index.ts             ← contextBridge 暴露的 window.dsh.* API
 │   └── renderer/                ← 渲染层（纯 HTML，不走框架）
+│       ├── titlebar.html        ← 自定义标题栏（深色 #202020、应用图标 + 标题文字 + 「帮助」文字按钮，加载于主窗口 webContents）
 │       ├── loading.html         ← 启动等待页（CSS 动画 + status 文本）
 │       ├── error.html           ← 错误页（重试 + 在线修复按钮）
 │       └── renderer.ts          ← 仅 console.log 占位
@@ -117,11 +119,15 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Electron 主进程 (src/main/index.ts)                        │
-│  ├── BrowserWindow  ──► 加载 loading.html → 加载 error.html  │
-│  │                       → 服务就绪后 loadURL(dsh URL)      │
+│  ├── BrowserWindow (titleBarStyle: hidden + WCO)            │
+│  │   ├── 主 webContents ──► titlebar.html（拖拽区+帮助按钮） │
+│  │   └── dshView (WebContentsView 子视图，标题栏以下全部区域)│
+│  │        └─► loading.html → error.html → loadURL(dsh URL)  │
 │  ├── IPC 路由  ──► 'status' / 'retry' / 'repair-dsh' / 'install-dsh-update'   │
 │  │                'install-update' / 'check-update' / 'get-app-version'      │
-│  │                'get-installed-version' / 'open-external' / 'show-update-menu'│
+│  │                'get-installed-version' / 'open-external' / 'show-help-menu'│
+│  ├── 帮助菜单  ──► 标题栏按钮触发 Menu.popup：检查更新 /      │
+│  │                更新日志（DSH 运行包 / 客户端）/ 关于       │
 │  ├── 客户端更新  ──► GitHub releases API 检测 → 引导打开 Release 页面手动下载 │
 │  └── 子进程管理 ──► spawn(内置 node.exe + 缓存的 DSH 入口)   │
 │                                                             │
@@ -140,11 +146,13 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  渲染层 (loading.html / error.html)                         │
+│  渲染层 (titlebar.html / loading.html / error.html)         │
 │  通过 window.dsh.* 与主进程通信；DSH Web UI 直接由           │
-│  BrowserWindow.loadURL() 加载（不经 Vite bundle）           │
+│  dshView.webContents.loadURL() 加载（不经 Vite bundle）     │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **窗口结构关键约束**：`titlebar.html` 必须加载在 BrowserWindow **自身的 webContents** 上，`dshView` 是覆盖标题栏以下区域的 WebContentsView 子视图。Window Controls Overlay 的 `env(titlebar-area-*)` CSS 环境变量**只在主 webContents 中生效**，在 WebContentsView 子视图中恒为 0（实测踩坑，见 §12.2 第 21 条）。
 
 ### 5.2 启动流程（`src/main/index.ts` 的 `startDshAndLoad()`）
 
@@ -176,11 +184,21 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `get-installed-version` | renderer → main (invoke) | loading.html       | 返回已安装的 DSH 版本号                                                       |
 | `install-dsh-update` | renderer → main (send) | DSH 更新横幅「更新 DSH」按钮   | 调用 `performUpdate()`；受 `isUpdating` 互斥锁 + 来源白名单保护                      |
 | `install-update`  | renderer → main (send) | 客户端更新横幅「前往下载」按钮       | 弹出确认框后 `shell.openExternal` 打开 GitHub Release 页面；受 `isTrustedSender` 与 `pendingAppUpdateReleaseUrl` 守卫 |
-| `open-external`   | renderer → main (invoke) | DSH UI 中的 GitHub 图标  | 在系统默认浏览器打开 URL；受 `isTrustedSender` 守卫，仅允许 `http(s)` 协议              |
-| `show-update-menu`| renderer → main (send) | DSH UI 右上角「检查更新」图标 | 弹原生 dialog 让用户选择检查项（DSH 运行包 / 客户端 / 全部），串行执行手动检查；受 `isCheckingUpdate` 互斥锁 + `isTrustedSender` 守卫 |
+| `open-external`   | renderer → main (invoke) | 关于模态框 GitHub 按钮 | 在系统默认浏览器打开 URL；受 `isTrustedSender` 守卫，仅允许 `http(s)` 协议              |
+| `show-help-menu`  | renderer → main (send) | 标题栏「帮助」按钮       | 校验 sender 为主窗口 webContents 后，以按钮页内坐标（窗口相对坐标，见 §12.2 第 23 条）`Menu.popup` 弹出原生菜单（检查更新 / 更新日志子菜单 / 关于）|
+| `help-menu-closed`| main → renderer        | 主进程 `menu-will-close` | 通知 titlebar.html 复位「帮助」按钮的 hover/active 类，防止原生菜单弹出期间鼠标事件被屏蔽导致的交互态颜色残留（见 §12.1 第 24 条）|
+| `get-app-icon`    | renderer → main (invoke) | titlebar.html        | 返回应用图标 32×32 PNG data URL（nativeImage 读取 icon.ico）；受 `isTrustedSender` 守卫，失败返回空串（页面侧隐藏图标） |
 
-所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external` / `show-update-menu`）的 IPC handler 入口都过 `isTrustedSender(event)`：
+所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external`）的 IPC handler 入口都过 `isTrustedSender(event)`：
 仅允许 `file:`（本地 loading/error 页）或 loopback `http(s)`（DSH 页面）的 senderFrame。防止外部页面或被劫持的 webContents 触发高危操作。
+`show-help-menu` 则直接比对 `event.sender === mainWindow.webContents`（更严格：只有标题栏页面能触发）。
+
+**帮助菜单结构**（标题栏「帮助」按钮 → 原生菜单）：
+- 检查更新... → 弹 dialog 选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）
+- 更新日志 → 子菜单：DSH 运行包日志（上游 `deepseek-ai/deepseek-harness` Releases，tag 前缀 `dsh-v`）/ DSH Desktop 客户端日志（本项目 Releases，tag 前缀 `v`）
+- 关于 DSH Desktop → 模态框（客户端版本号 + DSH 运行包版本号 + GitHub 仓库链接按钮）
+
+更新日志与关于模态框均通过 `dshView.webContents.executeJavaScript` 注入内容区（`[data-dsh-modal]`），单一实例互斥（`window.__dshModalCleanup`），Esc / 遮罩 / × 三种关闭方式；release notes 渲染走 `changelog.ts` 的 `renderMarkdownToHtml`（全文 HTML 转义 + 受限标签白名单，链接仅 `http(s)`）。
 
 ### 5.5 Preload API（`window.dsh`）
 
@@ -197,7 +215,9 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `installUpdate()`      | `void`                                   | 触发客户端更新引导（确认后打开 GitHub Release 页面）|
 | `installDshUpdate()`   | `void`                                   | 触发 DSH 运行包更新（切 loading 页执行）  |
 | `openExternal(url)`    | `Promise<{success, error?}>`            | 在系统默认浏览器打开 URL               |
-| `showUpdateMenu()`     | `void`                                   | 触发手动检查更新菜单（主进程弹 dialog 选择检查项）|
+| `showHelpMenu(position)` | `void`                                 | 标题栏「帮助」按钮触发；把按钮坐标发给主进程，在按钮下方弹出原生帮助菜单（检查更新 / 更新日志 / 关于）|
+| `onHelpMenuClosed(cb)` | `void`                               | 订阅帮助菜单关闭通知（主进程 `menu-will-close` 时发送）；titlebar.html 据此复位按钮交互态类名 |
+| `getAppIcon()`     | `Promise<string>`                        | 读取应用图标 data URL（标题栏左侧图标显示用，失败返回空串）|
 
 ---
 
@@ -448,13 +468,33 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 20. **不要在补 PR 中替换 `build/icon.ico`**。
     - `build/icon.ico` 是 .exe 的 Win32 资源、`installerIcon`/`uninstallerIcon`、以及任务栏固定图标嵌入资源的唯一底层来源。替换它会冻结 [§8.1.2](AGENTS.md) 描述的三处同步点。
     - 需要换图标必须独立发版分支。同一发版周期内 `build/icon.ico` 与 `resources/icon.ico` 保持双向同步；不要只改 `build/icon.ico`，也不要手动改 `resources/icon.ico`。
+21. **不要把 `titlebar.html` 加载到 WebContentsView 子视图中**。
+    - Window Controls Overlay 的 `env(titlebar-area-x/width/height)` CSS 环境变量**只在 BrowserWindow 自身 webContents 的页面里生效**，在 WebContentsView 子视图中恒为 0（实测：帮助按钮因此错位到窗口左边缘）。
+    - `@supports (width: env(titlebar-area-width))` 语法检查恒为真（Electron 永远支持 env() 语法），不能作为「值已填充」的判据，CSS fallback 分支永远不会生效。
+    - 正确结构：主 webContents 加载 `titlebar.html`（占满窗口、视觉上仅顶部 36px），`dshView` 子视图 `setBounds({ y: 36, ... })` 覆盖以下全部区域；窗口 resize/最大化/还原时统一走 `layoutViews()` 重排。
+    - `titleBarOverlay.height` 必须与 `TITLEBAR_HEIGHT`（36）一致，`titlebar.html` 的 body 高度同理。
+22. **更新日志（changelog.ts）的两个 tag 前缀不要弄混**。
+    - 上游 `deepseek-ai/deepseek-harness` 是 monorepo，DSH CLI 的 release tag 前缀是 `dsh-v`（过滤其他包的 release）；本项目 release tag 前缀是 `v`（与 `app-update.ts` 的解析约定一致）。
+    - 前缀剥掉后必须过 `isValidVersion()` 白名单，不合法条目直接跳过（曾因客户端日志漏剥 `v` 前缀导致 0 条目）。
+    - release body 是不可信远端文本：渲染前先 `escapeHtml` 全文转义再做受限标签转换（`renderMarkdownToHtml`），链接仅允许 `http(s)`；改渲染逻辑前先想清楚 XSS 面。
+23. **不要给 `Menu.popup` 的 x/y 叠加窗口屏幕坐标（`getContentBounds()`）偏移**。
+    - 官方文档声称 x/y 是屏幕坐标，但实测（Electron 33 / Windows / 200% DPI）传入坐标被按「窗口客户区相对坐标」解释：叠加偏移后最大化时碰巧正确（窗口原点≈屏幕原点），窗口化时菜单向右下偏移恰好等于窗口自身的屏幕位置。
+    - 正确做法：直接传按钮在标题栏页面内的 CSS 像素坐标（`rect.left` / `rect.bottom`），不要加任何 bounds。
+    - 若升级 Electron 后菜单位置异常，先怀疑此处坐标系行为变化；兜底方案是不传 x/y（菜单在鼠标点击处弹出）。
+    - 同页注意：titlebar.html 内绝对定位元素的 `top:50%` 参照的是整页（主 webContents 占满窗口高）而非 36px 标题栏——曾把标题文字打到窗口中部、被内容视图遮挡；垂直居中请用 `top:0; height:36px; line-height:36px`。
+24. **标题栏按钮的交互态不要用 `:hover` / `:active` 伪类，用 JS 管理的类名**（`titlebar.html` 的 `is-hover` / `is-active`）。
+    - 原生 `Menu.popup`（以及随后弹出的对话框）运行模态循环期间渲染进程收不到任何鼠标事件；菜单关闭后若鼠标已移出按钮，伪类状态永久滞留。
+    - 放大因素：标题栏仅 36px 高，下方内容区是独立 webContents（`dshView`），鼠标移入内容区不会触发标题栏页面的鼠标离开，`:hover` 永远不会自动清除。
+    - 类名的三个复位时机：`mouseenter/leave/down/up` 驱动、窗口 `blur`/`focus` 强制清除、主进程 `menu-will-close` 发 `help-menu-closed` 通知清除（覆盖 Esc / 点击外部 / 选中项全部关闭路径）。
+    - 新增标题栏交互元素时沿用同一模式，不要引入新的伪类交互态。
 
 ### 12.2 改之前要确认
 
 - 修改 `electron-builder.yml` 的 `extraResources` filter → 会显著影响安装包体积和首次启动行为，必须跑完整 `npm run package` 验证。
 - 修改 `dsh-manager.ts` 的 `findCachedDshEntry()` 查找顺序 → 改了顺序会让某些环境找不到 DSH 包。
 - 修改 `tsconfig.json` / `tsconfig.node.json` 的 `lib` / `types` → 三段式各自的类型会受影响，编译可能过不了。
-- 修改渲染层 HTML 的 CSP 头 → 当前 `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'`，DSH Web UI 通过 `loadURL` 加载不受这个 CSP 影响（每个 webContents 独立），但 loading/error 页的 inline 脚本依赖 `'unsafe-inline'`，不要直接删。
+- 修改渲染层 HTML 的 CSP 头 → 当前 `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'`，DSH Web UI 通过 `loadURL` 加载不受这个 CSP 影响（每个 webContents 独立），但 loading/error 页的 inline 脚本依赖 `'unsafe-inline'`，不要直接删。titlebar.html 额外有 `img-src 'self' data:`（应用图标走 data URL），删掉图标会消失。
+- 修改标题栏配色 → 必须同步两处：`titleBarOverlay`（系统三键区域颜色）与 `titlebar.html` 的 body 背景，漏一处会出现色差断层；当前为深色（#202020 / 符号 #e6e6e6）。
 - 修改 Preload 暴露的 `window.dsh.*` API 名或形状 → 错误页 JS 强耦合，改完必须同步改 `error.html`。
 
 ---

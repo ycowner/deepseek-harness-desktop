@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <title>DSH Desktop</title>
+    <style>
+      /* 主题变量：默认浅色；<html data-theme="dark"> 时覆盖为深色。
+         data-theme 由 preload 在 document_start 同步打标（首屏无闪烁），
+         运行中切换由页面脚本订阅 theme-changed 更新 */
+      :root {
+        --tb-bg: #f3f3f3;
+        --tb-text: #1f1f1f;
+        --tb-btn-hover: rgba(0, 0, 0, 0.06);
+        --tb-btn-active: rgba(0, 0, 0, 0.1);
+        --tb-focus-ring: rgba(0, 0, 0, 0.45);
+      }
+
+      :root[data-theme='dark'] {
+        /* 深色变量集即出厂配色（与主进程 titleBarOverlay #202020 同步） */
+        --tb-bg: #202020;
+        --tb-text: #e6e6e6;
+        --tb-btn-hover: rgba(255, 255, 255, 0.1);
+        --tb-btn-active: rgba(255, 255, 255, 0.16);
+        --tb-focus-ring: rgba(255, 255, 255, 0.6);
+      }
+
+      /* 全局重置 */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+
+      body {
+        /* 高度与主进程 titleBarOverlay.height（48px）保持一致 */
+        height: 48px;
+        /* 背景随主题切换：必须与主进程 titleBarOverlay.color 同步，
+           漏一处会出现色差断层（主进程切主题时会同步调 setTitleBarOverlay） */
+        background: var(--tb-bg);
+        color: var(--tb-text);
+        font-family: system-ui, -apple-system, sans-serif;
+        /* 整条标题栏可拖拽移动窗口（双击最大化由系统 WCO 层处理） */
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+
+      /* 左侧应用图标（16x16，data URL 由主进程通过 IPC 提供） */
+      .app-icon {
+        position: absolute;
+        left: 12px;
+        top: 16px;
+        width: 16px;
+        height: 16px;
+        display: none; /* data URL 加载成功后再显示 */
+      }
+
+      .title {
+        position: absolute;
+        left: 38px;
+        /* 垂直居中于 48px 标题栏。注意不能用 top:50%——绝对定位的包含块是整页
+           （主 webContents 占满窗口高），会把文字打到窗口中部、被内容视图遮挡 */
+        top: 0;
+        height: 48px;
+        line-height: 48px;
+        font-size: 12px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+
+      /* 帮助/设置按钮共用基础样式（文字形式，配色随主题） */
+      .help-btn,
+      .settings-btn {
+        position: absolute;
+        /* 垂直居中于 48px 标题栏（28px 按钮，上下各 10px） */
+        top: 10px;
+        height: 28px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--tb-text);
+        font-size: 12px;
+        font-family: inherit;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        /* 按钮必须脱离拖拽区域，否则点击事件不会触发 */
+        -webkit-app-region: no-drag;
+      }
+
+      /* 设置按钮：位于标题文字「DSH Desktop」之后（left: 38px 起的 12px 标题约 70-80px 宽），
+         紧邻帮助按钮左侧 */
+      .settings-btn {
+        width: 48px;
+        left: 130px;
+      }
+
+      /* 帮助按钮：位于设置按钮右侧（130 + 48 宽 + 8 间距） */
+      .help-btn {
+        width: 48px;
+        left: 186px;
+      }
+
+      /* 交互态用 JS 管理的类名替代 :hover / :active 伪类：原生菜单（Menu.popup）
+         弹出期间渲染进程收不到鼠标事件，菜单关闭后若鼠标已移出按钮，伪类状态会滞留，
+         且标题栏仅 48px 高、下方是独立 webContents 的 dshView，移出后永远不会自动清除。
+         类名能在窗口失焦 / 菜单关闭（help/settings-menu-closed 通知）时主动复位，见下方脚本 */
+      .help-btn.is-hover,
+      .settings-btn.is-hover {
+        background: var(--tb-btn-hover);
+      }
+      
+      .help-btn.is-active,
+      .settings-btn.is-active {
+        background: var(--tb-btn-active);
+      }
+      
+      /* focus 状态：鼠标点击后的 :focus 不显示焦点框，仅键盘（Tab）聚焦显示 */
+      .help-btn:focus:not(:focus-visible),
+      .settings-btn:focus:not(:focus-visible) {
+        outline: none;
+      }
+      
+      .help-btn:focus-visible,
+      .settings-btn:focus-visible {
+        outline: 1px solid var(--tb-focus-ring);
+        outline-offset: -1px;
+      }
+    </style>
+  </head>
+  <body>
+    <img class="app-icon" id="app-icon" alt="" draggable="false" />
+    <div class="title">DSH Desktop</div>
+    <button class="settings-btn" id="settings-btn" title="设置" aria-label="设置">设置</button>
+    <button class="help-btn" id="help-btn" title="帮助" aria-label="帮助">帮助</button>
+    <script>
+      // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
+      // （首屏打标由 preload 在 document_start 同步完成，此处仅处理运行中切换）
+      ;(function () {
+        if (window.dsh && typeof window.dsh.onThemeChanged === 'function') {
+          window.dsh.onThemeChanged(function (info) {
+            document.documentElement.dataset.theme = info.effective
+          })
+        }
+      })()
+      // 加载应用图标：主进程读取 icon.ico（dev: build/ / 打包: resources/）转 32x32 PNG
+      // data URL 后经 IPC 返回。走 data URL 规避两种环境的路径问题：
+      // dev 页面在 localhost:5173 引用不到 build/ 目录；打包后页面在 asar 内、图标在 asar 外。
+      ;(function () {
+        var img = document.getElementById('app-icon')
+        if (!img) return
+        if (window.dsh && typeof window.dsh.getAppIcon === 'function') {
+          window.dsh.getAppIcon().then(function (url) {
+            if (url) {
+              img.src = url
+              img.style.display = 'block'
+            }
+          }).catch(function () { /* 图标加载失败时仅保持隐藏，不影响标题栏其他功能 */ })
+        }
+      })()
+
+      // 帮助按钮交互状态管理：is-hover / is-active 类名替代 :hover / :active 伪类。
+      // 原生帮助菜单弹出期间渲染进程收不到鼠标事件，菜单关闭后若鼠标已移出按钮，
+      // 伪类状态会滞留且标题栏页面永远不会自动清除（下方内容区是独立 webContents）。
+      // 三个复位时机：窗口失焦/重新聚焦（菜单、对话框、Alt+Tab 都会经过）、
+      // 主进程菜单关闭通知（help-menu-closed，覆盖 Esc / 点击外部 / 选中项全部路径）。
+      // 复位后若鼠标仍在按钮上，下一次真实鼠标移动会经 mouseenter 恢复高亮。
+      ;(function () {
+        var btn = document.getElementById('help-btn')
+        if (!btn) return
+
+        function resetStates() {
+          btn.classList.remove('is-hover')
+          btn.classList.remove('is-active')
+        }
+
+        btn.addEventListener('mouseenter', function () {
+          btn.classList.add('is-hover')
+        })
+        btn.addEventListener('mouseleave', resetStates)
+        btn.addEventListener('mousedown', function () {
+          btn.classList.add('is-active')
+        })
+        btn.addEventListener('mouseup', function () {
+          btn.classList.remove('is-active')
+        })
+
+        // 窗口失焦后鼠标状态不再可信（菜单/对话框抢走输入），重新聚焦时同样先复位，
+        // 交由后续真实鼠标事件重建状态，避免残留
+        window.addEventListener('blur', resetStates)
+        window.addEventListener('focus', resetStates)
+
+        if (window.dsh && typeof window.dsh.onHelpMenuClosed === 'function') {
+          window.dsh.onHelpMenuClosed(resetStates)
+        }
+      })()
+
+      // 点击「帮助」按钮：把按钮位置（页面内 CSS 像素 = 窗口客户区相对坐标）发给主进程，
+      // 主进程直接以该坐标在按钮正下方弹出原生菜单（实测 popup x/y 按窗口相对坐标解释，
+      // 不叠加窗口屏幕位置偏移，详见 AGENTS.md §12.2 第 23 条）
+      ;(function () {
+        var btn = document.getElementById('help-btn')
+        if (!btn) return
+        btn.addEventListener('click', function () {
+          if (window.dsh && typeof window.dsh.showHelpMenu === 'function') {
+            var rect = btn.getBoundingClientRect()
+            window.dsh.showHelpMenu({ x: rect.left, y: rect.bottom, width: rect.width })
+          }
+        })
+      })()
+
+      // 「设置」按钮：交互态管理与复位机制复刻帮助按钮（is-hover / is-active 类名 +
+      // 失焦/聚焦复位 + 菜单关闭通知复位）。菜单为自定义多级浮层（独立视图覆盖在按钮上方），
+      // 打开期间按钮保持 is-active 高亮，直到收到 settings-menu-closed 复位；
+      // 点击后在按钮右下方打开菜单（设置 → 外观 → 明暗模式 → 系统/浅色/深色）
+      ;(function () {
+        var btn = document.getElementById('settings-btn')
+        if (!btn) return
+
+        // 菜单打开标记：防止重复打开，也供外部点击上报使用
+        var menuOpen = false
+        window.__dshSettingsMenuOpen = function () { return menuOpen }
+
+        function resetStates() {
+          btn.classList.remove('is-hover')
+          btn.classList.remove('is-active')
+        }
+
+        btn.addEventListener('mouseenter', function () {
+          btn.classList.add('is-hover')
+        })
+        btn.addEventListener('mouseleave', function () {
+          // 菜单打开期间保持 active 高亮，仅清 hover（与原生菜单期间的行为一致）
+          btn.classList.remove('is-hover')
+          if (!menuOpen) btn.classList.remove('is-active')
+        })
+        btn.addEventListener('mousedown', function () {
+          btn.classList.add('is-active')
+        })
+        btn.addEventListener('mouseup', function () {
+          if (!menuOpen) btn.classList.remove('is-active')
+        })
+        window.addEventListener('blur', resetStates)
+        window.addEventListener('focus', function () {
+          if (!menuOpen) resetStates()
+        })
+
+        if (window.dsh && typeof window.dsh.onSettingsMenuClosed === 'function') {
+          window.dsh.onSettingsMenuClosed(function () {
+            menuOpen = false
+            resetStates()
+          })
+        }
+
+        btn.addEventListener('click', function () {
+          // 开关切换：菜单已打开时再次点击设置按钮即关闭（上报主进程移除菜单视图，
+          // 主进程随后广播 settings-menu-closed 复位 menuOpen 与按钮交互态）
+          if (menuOpen) {
+            if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+              window.dsh.sendSettingsMenuOutside()
+            }
+            return
+          }
+          if (window.dsh && typeof window.dsh.showSettingsMenu === 'function') {
+            var rect = btn.getBoundingClientRect()
+            menuOpen = true
+            btn.classList.add('is-active')
+            window.dsh.showSettingsMenu({ x: rect.left, y: rect.bottom, width: rect.width })
+          }
+        })
+
+        // 菜单打开期间，标题栏页面上的任意点击（拖拽区除外）都视为点击菜单外部：
+        // 菜单浮层从标题栏下沿开始，标题栏区域内的点击不会落在菜单视图上，需由本页面补报。
+        // capture 阶段监听；点击设置按钮自身由上方 click 的切换逻辑处理，不重复上报。
+        window.addEventListener('mousedown', function (e) {
+          if (!menuOpen) return
+          if (e.target === btn) return
+          if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+            window.dsh.sendSettingsMenuOutside()
+          }
+        }, true)
+      })()
+    </script>
+  </body>
+</html>

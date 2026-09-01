@@ -1,12 +1,29 @@
-import { app, BrowserWindow, shell, ipcMain, nativeImage, dialog } from 'electron'
+import { app, BrowserWindow, WebContentsView, Menu, shell, ipcMain, nativeImage, dialog } from 'electron'
 import { join } from 'path'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
 import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
 import { checkForUpdate, getInstalledDshVersion, isValidVersion } from './dsh-version'
 import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, fetchGitHubLatest } from './app-update'
+import { fetchDshChangelogs, fetchAppChangelogs, renderMarkdownToHtml, escapeHtml, ChangelogEntry } from './changelog'
+import { getThemeSetting, setThemeSetting, getEffectiveTheme, getOverlayColors, registerThemeHooks, registerNativeThemeListener, applyEmulateMedia } from './theme-manager'
+import type { EffectiveTheme } from './theme-manager'
 
-// 主窗口引用
+// 自定义标题栏高度（与 BrowserWindow 的 titleBarOverlay.height 保持一致）
+const TITLEBAR_HEIGHT = 48
+
+// 主窗口引用（其 webContents 加载标题栏页面 titlebar.html）
 let mainWindow: BrowserWindow | null = null
+
+// 内容视图（loading / error / DSH Web UI 全部加载于此，覆盖标题栏以下全部区域）
+let dshView: WebContentsView | null = null
+
+// 设置菜单浮层视图（自定义多级菜单，需要时叠加到内容区上方，标题栏仅 48px 高
+// 无法在其页面内向下弹出，故用独立透明视图承载）
+let menuView: WebContentsView | null = null
+
+// 设置菜单浮层的视图尺寸（与 menu.html 三级面板的展开布局一致，勿单独改动）
+const SETTINGS_MENU_WIDTH = 626
+const SETTINGS_MENU_HEIGHT = 160
 
 // 标记是否正在执行启动流程（防止重试重复触发）
 let isStarting = false
@@ -20,6 +37,9 @@ let isRepairing = false
 // 手动检查更新互斥锁（防止快速点击重复弹 dialog）
 let isCheckingUpdate = false
 
+// 更新日志展示互斥锁（防止重复触发并发拉取与模态框互踩）
+let isShowingChangelog = false
+
 // 待更新的桌面应用版本号与 GitHub Release 页面地址（由 checkForGitHubAppUpdateAndPrompt 赋值，install-update IPC 读取）
 let pendingAppUpdateVersion: string | null = null
 let pendingAppUpdateReleaseUrl: string | null = null
@@ -30,7 +50,7 @@ let pendingDshUpdateVersion: string | null = null
 // 最近一次已提示过更新的 DSH 最新版本（用于抑制同一版本的重复弹窗/横幅）
 let lastPromptedDshVersion: string | null = null
 
-// GitHub 仓库地址（右上角图标点击后在系统默认浏览器打开）
+// GitHub 仓库地址（关于模态框 GitHub 按钮点击后在系统默认浏览器打开）
 const GITHUB_REPO_URL = 'https://github.com/ycowner/deepseek-harness-desktop'
 
 /**
@@ -43,28 +63,59 @@ function getRendererBaseUrl(): string | null {
 }
 
 /**
- * 加载 loading.html（开发环境用 URL，生产环境用文件）
+ * 同步内容视图布局
+ *
+ * 主窗口 webContents 自身加载标题栏页面（占满窗口，视觉上仅顶部 48px 高），
+ * dshView 子视图覆盖标题栏以下的全部区域。
+ * 窗口 resize / 最大化 / 还原均会触发 resize 事件，统一在此重排。
  */
-function loadLoadingPage(): void {
+function layoutViews(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!dshView) return
+  const [width, height] = mainWindow.getContentSize()
+  dshView.setBounds({ x: 0, y: TITLEBAR_HEIGHT, width, height: Math.max(0, height - TITLEBAR_HEIGHT) })
+}
+
+/**
+ * 加载标题栏页面到主窗口 webContents（开发环境用 URL，生产环境用文件）
+ *
+ * 必须加载在主窗口自身的 webContents 上：Window Controls Overlay 的
+ * env(titlebar-area-*) 环境变量只在主 webContents 中生效，
+ * WebContentsView 子视图中恒为 0（实测踩坑），帮助按钮会因此错位到左边缘。
+ */
+function loadTitlebarPage(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const base = getRendererBaseUrl()
   if (base) {
-    void mainWindow.loadURL(`${base}/loading.html`)
+    void mainWindow.webContents.loadURL(`${base}/titlebar.html`)
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/loading.html'))
+    void mainWindow.webContents.loadFile(join(__dirname, '../renderer/titlebar.html'))
   }
 }
 
 /**
- * 加载 error.html 并通过 query 参数传递错误信息
+ * 加载 loading.html 到内容视图（开发环境用 URL，生产环境用文件）
  */
-function loadErrorPage(message: string): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+function loadLoadingPage(): void {
+  if (!dshView) return
   const base = getRendererBaseUrl()
   if (base) {
-    void mainWindow.loadURL(`${base}/error.html?error=${encodeURIComponent(message)}`)
+    void dshView.webContents.loadURL(`${base}/loading.html`)
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/error.html'), {
+    void dshView.webContents.loadFile(join(__dirname, '../renderer/loading.html'))
+  }
+}
+
+/**
+ * 加载 error.html 到内容视图并通过 query 参数传递错误信息
+ */
+function loadErrorPage(message: string): void {
+  if (!dshView) return
+  const base = getRendererBaseUrl()
+  if (base) {
+    void dshView.webContents.loadURL(`${base}/error.html?error=${encodeURIComponent(message)}`)
+  } else {
+    void dshView.webContents.loadFile(join(__dirname, '../renderer/error.html'), {
       query: { error: message }
     })
   }
@@ -74,8 +125,8 @@ function loadErrorPage(message: string): void {
  * 向加载界面发送状态更新（通过 IPC channel 'status'）
  */
 function sendStatus(status: string): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('status', status)
+  if (dshView && !dshView.webContents.isDestroyed()) {
+    dshView.webContents.send('status', status)
   }
 }
 
@@ -112,7 +163,9 @@ function getWindowIconPath(): string {
  */
 function isTrustedSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean {
   try {
-    const url = new URL(event.senderFrame.url)
+    const frame = event.senderFrame
+    if (!frame) return false
+    const url = new URL(frame.url)
     if (url.protocol === 'file:') return true
     if (url.protocol === 'http:' || url.protocol === 'https:') {
       return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
@@ -124,15 +177,15 @@ function isTrustedSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEv
 }
 
 /**
- * 判断主窗口当前是否加载着 DSH Web UI（loopback 页面）
+ * 判断内容视图当前是否加载着 DSH Web UI（loopback 页面）
  *
  * 横幅/图标仅在 DSH 页面注入，避免污染 loading/error 页（这些页面结构简单，
  * 注入 banner 可能造成 UI 错位）；也避免在 DSH UI 尚未加载时执行 JS 抛错。
  */
 function isDshPageLoaded(): boolean {
-  if (!mainWindow || mainWindow.isDestroyed()) return false
+  if (!dshView) return false
   try {
-    const url = new URL(mainWindow.webContents.getURL())
+    const url = new URL(dshView.webContents.getURL())
     return (url.protocol === 'http:' || url.protocol === 'https:') &&
       (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1')
   } catch {
@@ -141,65 +194,58 @@ function isDshPageLoaded(): boolean {
 }
 
 /**
- * 根据当前横幅高度，同步调整右上角浮动图标的 top 位置
+ * 注入组件（更新横幅 / 模态框）的 CSS 变量色板：浅色 / 深色两套。
  *
- * 涉及 GitHub 图标 [data-dsh-github-link] 与检查更新图标 [data-dsh-update-check]。
- * 横幅出现/关闭时统一调用，避免图标被横幅遮挡。
+ * 注入代码统一引用变量而非硬编码色值，主题切换时由 syncInjectedTheme
+ * 更新 :root 上的变量值；新注入的组件在注入时即按当前主题设置变量。
  */
-async function adjustFloatingIconsPosition(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  const adjustCode = `
-    (function () {
-      var banners = document.querySelector('[data-dsh-update-banners]')
-      var bannerHeight = banners ? banners.offsetHeight : 0
-      var selectors = ['[data-dsh-github-link]', '[data-dsh-update-check]']
-      for (var i = 0; i < selectors.length; i++) {
-        var el = document.querySelector(selectors[i])
-        if (el) el.style.top = (16 + bannerHeight) + 'px'
-      }
-    })()
-  `
-  try {
-    await mainWindow.webContents.executeJavaScript(adjustCode)
-  } catch { /* 页面未就绪时静默忽略 */ }
+const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>> = {
+  light: {
+    '--dsh-modal-bg': '#ffffff',
+    '--dsh-modal-text': '#374151',
+    '--dsh-modal-heading': '#111827',
+    '--dsh-modal-subtext': '#374151',
+    '--dsh-modal-muted': '#6b7280',
+    '--dsh-modal-border': '#e5e7eb',
+    '--dsh-modal-hover': '#f3f4f6',
+    '--dsh-modal-code-bg': '#f3f4f6',
+    '--dsh-modal-link': '#2563eb',
+    '--dsh-banner-btn-bg': '#ffffff'
+  },
+  dark: {
+    '--dsh-modal-bg': '#1f2937',
+    '--dsh-modal-text': '#d1d5db',
+    '--dsh-modal-heading': '#f9fafb',
+    '--dsh-modal-subtext': '#d1d5db',
+    '--dsh-modal-muted': '#9ca3af',
+    '--dsh-modal-border': '#374151',
+    '--dsh-modal-hover': '#374151',
+    '--dsh-modal-code-bg': '#111827',
+    '--dsh-modal-link': '#60a5fa',
+    '--dsh-banner-btn-bg': '#ffffff'
+  }
 }
 
 /**
- * 向 DSH Web UI 右上角注入"检查更新"图标
+ * 同步 DSH 页内已注入组件的主题变量（横幅 / 模态框共用同一套变量）
  *
- * 与 GitHub 图标风格一致：40x40 圆形、半透明黑底、白色刷新 SVG。
- * 位置：GitHub 图标（right:16px）左侧 56px 处，即 right:72px。
- * 点击：调用 window.dsh.showUpdateMenu()，主进程弹 dialog 让用户选择检查项。
+ * 仅在 DSH 页已加载时执行（横幅/模态框只注入在 DSH 页）。两个调用路径：
+ * ① 主题切换时由 theme-manager 的同步回调触发；② 页面导航到 DSH 后主动设置，
+ * 保证后续注入的横幅/模态框变量已就位。
  */
-async function injectUpdateCheckButton(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+function syncInjectedTheme(): void {
+  if (!dshView) return
   if (!isDshPageLoaded()) return
-  const buttonCode = `
+  const vars = INJECTED_THEME_VARS[getEffectiveTheme()]
+  const code = `
     (function () {
-      if (document.querySelector('[data-dsh-update-check]')) {
-        return
-      }
-      var link = document.createElement('div')
-      link.setAttribute('data-dsh-update-check', '')
-      link.title = '检查更新'
-      var bannerHeight = 0
-      var banners = document.querySelector('[data-dsh-update-banners]')
-      if (banners) bannerHeight = banners.offsetHeight
-      link.style.cssText = 'position: fixed; top: ' + (16 + bannerHeight) + 'px; right: 72px; z-index: 2147483647; width: 40px; height: 40px; border-radius: 20px; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.3);'
-      link.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>'
-      link.addEventListener('click', function () {
-        if (window.dsh && typeof window.dsh.showUpdateMenu === 'function') {
-          window.dsh.showUpdateMenu()
-        }
-      })
-      document.body.appendChild(link)
+      var vars = ${JSON.stringify(vars)}
+      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])
     })()
   `
-  try {
-    await mainWindow.webContents.executeJavaScript(buttonCode)
-  } catch (err) {
-    console.warn(`[DSH] 注入检查更新图标失败: ${(err as Error).message}`)
-  }
+  dshView.webContents.executeJavaScript(code).catch(() => {
+    /* 页面导航中静默忽略 */
+  })
 }
 
 /**
@@ -321,7 +367,259 @@ async function manualCheckAppUpdate(): Promise<void> {
 }
 
 /**
- * 创建主窗口并加载 loading.html
+ * 帮助菜单「检查更新...」入口：弹 dialog 让用户选择检查项
+ *
+ * 沿用原有 show-update-menu 的检查逻辑（DSH 运行包 / 客户端 / 全部），
+ * 受 isCheckingUpdate 互斥锁保护，防止重复弹 dialog。
+ */
+async function showUpdateCheckChoiceDialog(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (isCheckingUpdate) return
+  isCheckingUpdate = true
+  try {
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: '检查更新',
+      message: '请选择要检查的项目',
+      buttons: ['检查 DSH 运行包', '检查 DSH Desktop 客户端', '全部检查', '取消'],
+      defaultId: 2,
+      cancelId: 3
+    })
+    if (choice.response === 3) return // 取消
+
+    if (choice.response === 0) {
+      await manualCheckDshUpdate()
+    } else if (choice.response === 1) {
+      await manualCheckAppUpdate()
+    } else if (choice.response === 2) {
+      // 全部检查：串行执行，第一个 dialog 关闭后再弹第二个
+      await manualCheckDshUpdate()
+      if (!mainWindow || mainWindow.isDestroyed()) return
+      await manualCheckAppUpdate()
+    }
+  } finally {
+    isCheckingUpdate = false
+  }
+}
+
+/**
+ * 向内容视图注入模态框外壳（标题 + 初始内容），并接管 Esc / 遮罩 / × 关闭
+ *
+ * 同一时间只允许一个模态框：注入前先清理旧模态框（含其 keydown 监听）。
+ * 内容区通过 [data-dsh-modal-body] 标记，后续用 updateModalBody 替换。
+ * 所有拼入 HTML 的变量均经 JSON.stringify / escapeHtml 处理，防注入断裂。
+ */
+async function injectModalShell(title: string, bodyHtml: string): Promise<void> {
+  if (!dshView) return
+  const modalCode = `
+    (function () {
+      // 清理旧模态框与其全局清理函数（跨多次注入保持单一实例）
+      if (window.__dshModalCleanup) { try { window.__dshModalCleanup() } catch (e) {} }
+      var prev = document.querySelector('[data-dsh-modal]')
+      if (prev) prev.remove()
+
+      var style = document.createElement('style')
+      style.setAttribute('data-dsh-modal-style', '')
+      style.textContent = '[data-dsh-modal]{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif;}' +
+        '[data-dsh-modal] .dsh-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.5);}' +
+        '[data-dsh-modal] .dsh-card{position:relative;width:min(720px,92vw);max-height:80vh;display:flex;flex-direction:column;background:var(--dsh-modal-bg);color:var(--dsh-modal-text);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.35);overflow:hidden;}' +
+        '[data-dsh-modal] .dsh-head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--dsh-modal-border);flex:none;}' +
+        '[data-dsh-modal] .dsh-title{font-size:15px;font-weight:600;color:var(--dsh-modal-heading);}' +
+        '[data-dsh-modal] .dsh-close{width:28px;height:28px;border:none;border-radius:6px;background:transparent;color:var(--dsh-modal-muted);font-size:18px;line-height:1;cursor:pointer;}' +
+        '[data-dsh-modal] .dsh-close:hover{background:var(--dsh-modal-hover);color:var(--dsh-modal-heading);}' +
+        '[data-dsh-modal] .dsh-body{padding:16px 20px 20px;overflow-y:auto;font-size:13px;line-height:1.65;}' +
+        '[data-dsh-modal] .dsh-body h3{font-size:15px;margin:14px 0 6px;color:var(--dsh-modal-heading);}' +
+        '[data-dsh-modal] .dsh-body h4{font-size:14px;margin:12px 0 5px;color:var(--dsh-modal-heading);}' +
+        '[data-dsh-modal] .dsh-body h5{font-size:13px;margin:10px 0 4px;color:var(--dsh-modal-subtext);}' +
+        '[data-dsh-modal] .dsh-body p{margin:6px 0;}' +
+        '[data-dsh-modal] .dsh-body ul{margin:6px 0;padding-left:22px;}' +
+        '[data-dsh-modal] .dsh-body li{margin:3px 0;}' +
+        '[data-dsh-modal] .dsh-body pre{background:var(--dsh-modal-code-bg);border-radius:6px;padding:10px 12px;overflow-x:auto;margin:8px 0;font-size:12px;}' +
+        '[data-dsh-modal] .dsh-body code{background:var(--dsh-modal-code-bg);border-radius:4px;padding:1px 5px;font-family:ui-monospace,Consolas,monospace;font-size:12px;}' +
+        '[data-dsh-modal] .dsh-body pre code{background:transparent;padding:0;}' +
+        '[data-dsh-modal] .dsh-body a{color:var(--dsh-modal-link);}' +
+        '[data-dsh-modal] .dsh-body hr{border:none;border-top:1px solid var(--dsh-modal-border);margin:12px 0;}' +
+        '[data-dsh-modal] .dsh-body .dsh-log-entry{margin:0 0 14px;}' +
+        '[data-dsh-modal] .dsh-body .dsh-log-head{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;}' +
+        '[data-dsh-modal] .dsh-body .dsh-log-ver{font-size:14px;font-weight:600;color:var(--dsh-modal-heading);}' +
+        '[data-dsh-modal] .dsh-body .dsh-log-date{font-size:12px;color:var(--dsh-modal-muted);}' +
+        '[data-dsh-modal] .dsh-body .dsh-log-divider{border:none;border-top:1px solid var(--dsh-modal-border);margin:0 0 14px;}'
+
+      // 注入时按当前生效主题设置组件级 CSS 变量（横幅与模态框共用同一套变量）
+      var vars = ${JSON.stringify(INJECTED_THEME_VARS[getEffectiveTheme()])}
+      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])
+
+      var root = document.createElement('div')
+      root.setAttribute('data-dsh-modal', '')
+
+      var backdrop = document.createElement('div')
+      backdrop.className = 'dsh-backdrop'
+
+      var card = document.createElement('div')
+      card.className = 'dsh-card'
+
+      var head = document.createElement('div')
+      head.className = 'dsh-head'
+      var titleEl = document.createElement('span')
+      titleEl.className = 'dsh-title'
+      titleEl.textContent = ${JSON.stringify(title)}
+      var closeBtn = document.createElement('button')
+      closeBtn.className = 'dsh-close'
+      closeBtn.setAttribute('aria-label', '关闭')
+      closeBtn.textContent = '×'
+      head.appendChild(titleEl)
+      head.appendChild(closeBtn)
+
+      var body = document.createElement('div')
+      body.className = 'dsh-body'
+      body.setAttribute('data-dsh-modal-body', '')
+      body.innerHTML = ${JSON.stringify(bodyHtml)}
+
+      // 模态框内 fragment 锚点导航委托：更新日志的 [中文](#cn-...) 目录链接
+      // 命中后拦截默认行为（防止整个 DSH 页面被 fragment 导航），改为在内容区
+      // 滚动到目标标题（id 均由渲染端白名单校验后输出）
+      body.addEventListener('click', function (e) {
+        var el = e.target
+        while (el && el.nodeType === 1 && el.tagName !== 'A') el = el.parentNode
+        if (!el || el.nodeType !== 1) return
+        var href = el.getAttribute('href') || ''
+        if (href.charAt(0) !== '#') return
+        e.preventDefault()
+        var target = document.getElementById(href.slice(1))
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+
+      card.appendChild(head)
+      card.appendChild(body)
+      root.appendChild(style)
+      root.appendChild(backdrop)
+      root.appendChild(card)
+      document.body.appendChild(root)
+
+      function close() {
+        root.remove()
+        document.removeEventListener('keydown', onKey)
+        window.__dshModalCleanup = null
+      }
+      function onKey(e) { if (e.key === 'Escape') close() }
+      document.addEventListener('keydown', onKey)
+      closeBtn.addEventListener('click', close)
+      backdrop.addEventListener('click', close)
+      window.__dshModalCleanup = close
+    })()
+  `
+  try {
+    await dshView.webContents.executeJavaScript(modalCode)
+  } catch (err) {
+    console.warn(`[DSH] 注入模态框失败: ${(err as Error).message}`)
+  }
+}
+
+/**
+ * 替换当前模态框的内容区 HTML（无模态框时静默忽略）
+ */
+async function updateModalBody(bodyHtml: string): Promise<void> {
+  if (!dshView) return
+  const code = `
+    (function () {
+      var body = document.querySelector('[data-dsh-modal-body]')
+      if (body) body.innerHTML = ${JSON.stringify(bodyHtml)}
+    })()
+  `
+  try {
+    await dshView.webContents.executeJavaScript(code)
+  } catch { /* 页面导航中静默忽略 */ }
+}
+
+/**
+ * 将更新日志条目列表拼装为模态框内容 HTML
+ *
+ * version / publishedAt 已在 changelog.ts 校验（白名单 + 日期截取），可安全内插；
+ * notes 经 renderMarkdownToHtml 安全渲染（全文转义 + 受限标签）。
+ */
+function buildChangelogHtml(entries: ChangelogEntry[]): string {
+  if (entries.length === 0) {
+    return '<p style="color:var(--dsh-modal-muted)">暂无更新日志。</p>'
+  }
+  const blocks = entries.map((entry) => `
+    <div class="dsh-log-entry">
+      <div class="dsh-log-head"><span class="dsh-log-ver">v${entry.version}</span><span class="dsh-log-date">${entry.publishedAt}</span></div>
+      ${entry.notes.trim() ? renderMarkdownToHtml(entry.notes) : '<p style="color:var(--dsh-modal-muted)">暂无说明</p>'}
+    </div>
+  `)
+  return blocks.join('<hr class="dsh-log-divider">') +
+    '<p style="color:var(--dsh-modal-muted);font-size:12px;margin-top:4px">数据来自 GitHub Releases</p>'
+}
+
+/**
+ * 帮助菜单「更新日志」入口：拉取并展示更新日志模态框
+ *
+ * 先注入加载中模态框，数据到达后替换内容；失败时在模态框内显示错误。
+ * 受 isShowingChangelog 互斥锁保护，防止并发拉取互踩。
+ */
+async function showChangelog(kind: 'dsh' | 'app'): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed() || !dshView) return
+  if (isShowingChangelog) return
+  isShowingChangelog = true
+  const title = kind === 'dsh' ? 'DSH 运行包更新日志' : 'DSH Desktop 客户端更新日志'
+  try {
+    await injectModalShell(title, '<p style="color:var(--dsh-modal-muted)">正在加载更新日志，请稍候...</p>')
+    const entries = await (kind === 'dsh' ? fetchDshChangelogs() : fetchAppChangelogs())
+    await updateModalBody(buildChangelogHtml(entries))
+  } catch (err) {
+    await updateModalBody(`<p style="color:#dc2626">加载失败: ${escapeHtml((err as Error).message)}</p>`)
+  } finally {
+    isShowingChangelog = false
+  }
+}
+
+/**
+ * 帮助菜单「关于」入口：展示关于模态框
+ *
+ * 内容：DSH Desktop 客户端版本号 + DSH 运行包版本号 + GitHub 仓库链接按钮。
+ */
+async function showAboutModal(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed() || !dshView) return
+  const appVersion = escapeHtml(getInstalledAppVersion())
+  const dshVersion = escapeHtml(getInstalledDshVersion())
+  const bodyHtml = `
+    <div style="display:flex;flex-direction:column;gap:10px;min-width:320px">
+      <div style="font-size:16px;font-weight:600;color:var(--dsh-modal-heading)">DSH Desktop</div>
+      <div style="display:flex;flex-direction:column;gap:6px;font-size:13px">
+        <div><span style="color:var(--dsh-modal-muted)">客户端版本：</span><strong>v${appVersion}</strong></div>
+        <div><span style="color:var(--dsh-modal-muted)">DSH 运行包版本：</span><strong>v${dshVersion}</strong></div>
+      </div>
+      <div style="margin-top:6px">
+        <button class="dsh-about-repo" style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="#fff"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub 仓库</button>
+      </div>
+    </div>
+  `
+  await injectModalShell('关于 DSH Desktop', bodyHtml)
+  // 绑定 GitHub 仓库按钮：走 window.dsh.openExternal（受 isTrustedSender 守卫）
+  const wireCode = `
+    (function () {
+      var btn = document.querySelector('.dsh-about-repo')
+      if (btn) btn.addEventListener('click', function () {
+        if (window.dsh && typeof window.dsh.openExternal === 'function') {
+          window.dsh.openExternal(${JSON.stringify(GITHUB_REPO_URL)})
+        }
+      })
+    })()
+  `
+  try {
+    await dshView.webContents.executeJavaScript(wireCode)
+  } catch { /* 页面导航中静默忽略 */ }
+}
+
+/**
+ * 创建主窗口（自定义标题栏 + 内容子视图）
+ *
+ * - titleBarStyle: 'hidden' + titleBarOverlay：隐藏系统标题栏，
+ *   由 Windows 绘制最小化/最大化/关闭按钮（WCO），保留 Snap Layouts、
+ *   双击标题栏最大化等原生行为；
+ * - 主窗口 webContents：加载 titlebar.html（拖拽区域 + 帮助按钮，
+ *   WCO 环境变量仅在主 webContents 中生效）；
+ * - dshView：子视图覆盖标题栏以下区域，loading / error / DSH Web UI 全部加载于此。
  */
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -331,6 +629,12 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    // WCO 按钮区（最小化/最大化/关闭）配色按当前生效主题初始化：
+    // 深色沿用出厂值 #202020，浅色 #f3f3f3（见 theme-manager）。必须与
+    // titlebar.html 的 body 背景同步，漏一处会出现色差断层；
+    // 运行中切换主题由 applyTheme 调 setTitleBarOverlay 更新
+    titleBarOverlay: { ...getOverlayColors(), height: TITLEBAR_HEIGHT },
     icon: nativeImage.createFromPath(getWindowIconPath()),
     webPreferences: {
       nodeIntegration: false,
@@ -339,7 +643,23 @@ function createWindow(): void {
     }
   })
 
-  // 先加载 loading 界面
+  dshView = new WebContentsView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: join(__dirname, '../preload/index.js')
+    }
+  })
+  mainWindow.contentView.addChildView(dshView)
+  layoutViews()
+
+  // 内容视图模拟当前生效主题的 prefers-color-scheme（DSH UI 若响应该媒体查询则跟随）；
+  // 此时页面尚未提交导航（无 URL），CDP 回退路径内部会跳过，
+  // 真正生效靠后续导航完成点（startDshAndLoad / performUpdate）的重设
+  applyEmulateMedia(dshView.webContents, getEffectiveTheme())
+
+  // 加载标题栏与 loading 界面
+  loadTitlebarPage()
   loadLoadingPage()
 
   // 窗口准备好后再显示，避免出现白屏
@@ -347,11 +667,18 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
-  // 外部链接在系统默认浏览器中打开
+  // 窗口尺寸变化（resize / 最大化 / 还原）时同步视图布局；
+  // 设置菜单浮层的坐标是打开时一次性计算的，尺寸变化直接关闭避免错位
+  mainWindow.on('resize', () => {
+    hideSettingsMenuView()
+    layoutViews()
+  })
+
+  // 外部链接在系统默认浏览器中打开（挂在内容视图上）
   // 仅对真正的外部 http(s) URL 转发；DSH 自身地址(127.0.0.1/localhost)、
   // 空 URL、about:blank 一律 deny 不打开浏览器，避免 DSH Web UI 加载时
   // 自动 window.open 自身地址导致系统浏览器跟着弹出
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  dshView.webContents.setWindowOpenHandler((details) => {
     try {
       const url = new URL(details.url)
       const isHttp = url.protocol === 'http:' || url.protocol === 'https:'
@@ -370,16 +697,112 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    dshView = null
+    menuView = null
   })
 }
 
 /**
- * 启动 DSH 服务并在就绪后加载到主窗口
+ * 确保设置菜单浮层视图已创建（懒创建：首次打开设置菜单时）
+ *
+ * 背景透明：面板之外的区域可透视到下方内容；每次打开前重新加载页面，
+ * 以重置展开状态（并天然拿到当前主题的 data-theme 打标）。
+ */
+function ensureMenuView(): WebContentsView {
+  if (!menuView) {
+    menuView = new WebContentsView({
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        transparent: true,
+        preload: join(__dirname, '../preload/index.js')
+      }
+    })
+    // 层叠无需 setZIndex：子视图按加入顺序绘制，menuView 最后 addChildView，
+    // 天然覆盖在标题栏页面与 dshView 之上
+    const base = getRendererBaseUrl()
+    if (base) {
+      void menuView.webContents.loadURL(`${base}/menu.html`)
+    } else {
+      void menuView.webContents.loadFile(join(__dirname, '../renderer/menu.html'))
+    }
+  } else {
+    const base = getRendererBaseUrl()
+    if (base) {
+      void menuView.webContents.loadURL(`${base}/menu.html`)
+    } else {
+      void menuView.webContents.loadFile(join(__dirname, '../renderer/menu.html'))
+    }
+  }
+  return menuView
+}
+
+/**
+ * 一次性外部点击上报钩子：菜单打开期间注入内容视图（含 DSH 远程页，
+ * preload 同样生效），任意 mousedown 上报关闭并自我移除；
+ * 菜单下次打开时重新注入，避免监听残留重复上报。
+ */
+const DSH_OUTSIDE_CLICK_HOOK = `(() => {
+  try {
+    if (window.__dshMenuCloser) document.removeEventListener('mousedown', window.__dshMenuCloser, true)
+    const h = () => {
+      document.removeEventListener('mousedown', h, true)
+      window.__dshMenuCloser = null
+      try {
+        if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+          window.dsh.sendSettingsMenuOutside()
+        }
+      } catch (e) {}
+    }
+    window.__dshMenuCloser = h
+    document.addEventListener('mousedown', h, true)
+  } catch (e) {}
+})()`
+
+/**
+ * 打开设置菜单浮层：视图左边缘对齐设置按钮左边缘（根面板在视图内 (0,0)，
+ * 即菜单正好出现在设置按钮正下方）、顶部紧贴标题栏下沿，
+ * 右侧/底部超出窗口时向内收紧。视图加到 contentView 顶层，覆盖标题栏页面与 dshView。
+ */
+function showSettingsMenuView(position: { x: number; y: number; width: number }): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const view = ensureMenuView()
+  const [winWidth, winHeight] = mainWindow.getContentSize()
+  const left = Math.min(Math.round(position.x), Math.max(0, winWidth - SETTINGS_MENU_WIDTH))
+  const top = Math.min(TITLEBAR_HEIGHT, Math.max(0, winHeight - SETTINGS_MENU_HEIGHT))
+  view.setBounds({ x: left, y: top, width: SETTINGS_MENU_WIDTH, height: SETTINGS_MENU_HEIGHT })
+  mainWindow.contentView.addChildView(view)
+
+  // 菜单浮层只覆盖左上角一小块区域，内容区其余部分的点击仍落在 dshView 上，
+  // 需向内容视图注入一次性 capture mousedown 监听，点击内容区即上报关闭菜单。
+  // 标题栏区域的点击由 titlebar.html 自身的 capture 监听补报。
+  if (dshView && !dshView.webContents.isDestroyed()) {
+    dshView.webContents.executeJavaScript(DSH_OUTSIDE_CLICK_HOOK, true).catch(() => {
+      /* 页面导航中静默忽略 */
+    })
+  }
+}
+
+/**
+ * 关闭设置菜单浮层：移除视图并通知标题栏页面复位「设置」按钮交互态。
+ * 覆盖全部关闭路径：选中主题项 / 点击外部 / Esc / 窗口 resize 与关闭。
+ */
+function hideSettingsMenuView(): void {
+  if (menuView && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.contentView.removeChildView(menuView)
+  }
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('settings-menu-closed')
+  }
+}
+
+/**
+ * 启动 DSH 服务并在就绪后加载到内容视图
  *
  * 流程：
  * 1. 发送状态更新到加载界面
  * 2. 启动 DSH 进程
- * 3. 等待服务就绪（最多 180 秒）
+ * 3. 等待服务就绪（最多 60 秒）
  * 4. 就绪后加载 DSH 的 Web 界面；超时则显示错误界面
  */
 async function startDshAndLoad(): Promise<void> {
@@ -403,18 +826,18 @@ async function startDshAndLoad(): Promise<void> {
     }
 
     // 服务就绪后加载 DSH Web 界面
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      await mainWindow.loadURL(dshProcess.url)
+    if (mainWindow && !mainWindow.isDestroyed() && dshView) {
+      await dshView.webContents.loadURL(dshProcess.url)
+      // 预置注入组件的主题 CSS 变量（新文档上旧变量已失效，为后续横幅/模态框注入做准备）
+      syncInjectedTheme()
+      // 新文档上重设 prefers-color-scheme 模拟（CDP 会话跨导航不保留，每次导航后需重设）
+      applyEmulateMedia(dshView.webContents, getEffectiveTheme())
       // 更新窗口标题显示当前版本
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
       // 异步检查更新（不阻塞启动流程）
       checkDshUpdateAndPrompt()
       // 异步检查桌面应用自身更新（不阻塞启动流程；有新版时引导打开 GitHub Release 页面）
       void checkForGitHubAppUpdateAndPrompt()
-      // 向 DSH UI 注入 GitHub 仓库链接图标（不阻塞启动流程）
-      void injectGitHubLink()
-      // 向 DSH UI 注入右上角"检查更新"图标（不阻塞启动流程）
-      void injectUpdateCheckButton()
     }
   } catch (err) {
     const error = err as Error
@@ -497,14 +920,14 @@ async function performUpdate(): Promise<void> {
     }
 
     // 重新加载 DSH Web UI
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      await mainWindow.loadURL(dshProcess.url)
+    if (mainWindow && !mainWindow.isDestroyed() && dshView) {
+      await dshView.webContents.loadURL(dshProcess.url)
+      // 预置注入组件的主题 CSS 变量（同 startDshAndLoad）
+      syncInjectedTheme()
+      // 新文档上重设 prefers-color-scheme 模拟（同 startDshAndLoad）
+      applyEmulateMedia(dshView.webContents, getEffectiveTheme())
       // 更新窗口标题
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
-      // 重新注入 GitHub 仓库链接图标
-      void injectGitHubLink()
-      // 重新注入右上角"检查更新"图标
-      void injectUpdateCheckButton()
     }
 
     // DSH 运行包已更新，清除待安装标记并复位抑制计数（避免镜像滞后时该版本永不再提示）
@@ -554,7 +977,7 @@ async function checkForGitHubAppUpdateAndPrompt(): Promise<void> {
  * 关闭按钮仅隐藏横幅，不影响定时轮询的抑制状态。
  */
 async function injectDshUpdateBanner(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!dshView) return
   if (!pendingDshUpdateVersion) return
   if (!isDshPageLoaded()) return
   // 防御性白名单：远端版本号未通过校验则放弃注入
@@ -573,13 +996,16 @@ async function injectDshUpdateBanner(): Promise<void> {
         container.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;'
         document.body.appendChild(container)
       }
+      var vars = ${JSON.stringify(INJECTED_THEME_VARS[getEffectiveTheme()])}
+      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])
+
       var existing = container.querySelector('[data-dsh-update-banner="dsh"]')
       if (existing) existing.remove()
 
       var banner = document.createElement('div')
       banner.setAttribute('data-dsh-update-banner', 'dsh')
       banner.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 16px;background:#2563eb;color:#fff;font-size:13px;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,.25);'
-      banner.innerHTML = '<span>DSH 运行包有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:#fff;color:#2563eb;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">更新 DSH</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
+      banner.innerHTML = '<span>DSH 运行包有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:var(--dsh-banner-btn-bg);color:#2563eb;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">更新 DSH</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
 
       banner.querySelector('[data-action="update"]').addEventListener('click', function () {
         if (window.dsh && typeof window.dsh.installDshUpdate === 'function') {
@@ -588,26 +1014,13 @@ async function injectDshUpdateBanner(): Promise<void> {
       })
       banner.querySelector('[data-action="close"]').addEventListener('click', function () {
         banner.remove()
-        var selectors = ['[data-dsh-github-link]', '[data-dsh-update-check]']
-        var banners = document.querySelector('[data-dsh-update-banners]')
-        var bannerHeight = banners ? banners.offsetHeight : 0
-        for (var i = 0; i < selectors.length; i++) {
-          var el = document.querySelector(selectors[i])
-          if (el) el.style.top = (16 + bannerHeight) + 'px'
-        }
       })
 
       container.appendChild(banner)
-      var selectors = ['[data-dsh-github-link]', '[data-dsh-update-check]']
-      for (var i = 0; i < selectors.length; i++) {
-        var el = document.querySelector(selectors[i])
-        if (el) el.style.top = (16 + container.offsetHeight) + 'px'
-      }
     })()
   `
   try {
-    await mainWindow.webContents.executeJavaScript(bannerCode)
-    await adjustFloatingIconsPosition()
+    await dshView.webContents.executeJavaScript(bannerCode)
   } catch (err) {
     // 页面尚未就绪或上下文已销毁时静默忽略（6h 轮询触发但页面处于 loading/error 页）
     console.warn(`[DSH] 注入 DSH 更新横幅失败: ${(err as Error).message}`)
@@ -622,7 +1035,7 @@ async function injectDshUpdateBanner(): Promise<void> {
  * 关闭按钮仅隐藏横幅。
  */
 async function injectAppUpdateBanner(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!dshView) return
   if (!pendingAppUpdateVersion) return
   if (!isDshPageLoaded()) return
   if (!isValidVersion(pendingAppUpdateVersion)) {
@@ -640,13 +1053,16 @@ async function injectAppUpdateBanner(): Promise<void> {
         container.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;'
         document.body.appendChild(container)
       }
+      var vars = ${JSON.stringify(INJECTED_THEME_VARS[getEffectiveTheme()])}
+      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])
+
       var existing = container.querySelector('[data-dsh-update-banner="app"]')
       if (existing) existing.remove()
 
       var banner = document.createElement('div')
       banner.setAttribute('data-dsh-update-banner', 'app')
       banner.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:10px 16px;background:#7c3aed;color:#fff;font-size:13px;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,.25);'
-      banner.innerHTML = '<span>DSH Desktop 客户端有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:#fff;color:#7c3aed;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">前往下载</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
+      banner.innerHTML = '<span>DSH Desktop 客户端有更新 <strong>v${currentVersion}</strong> → <strong>v${latestVersion}</strong></span><button data-action="update" style="padding:4px 12px;background:var(--dsh-banner-btn-bg);color:#7c3aed;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;">前往下载</button><button data-action="close" style="margin-left:4px;padding:2px 6px;background:transparent;color:#fff;border:none;font-size:16px;line-height:1;cursor:pointer;">×</button>'
 
       banner.querySelector('[data-action="update"]').addEventListener('click', function () {
         if (window.dsh && typeof window.dsh.installUpdate === 'function') {
@@ -655,66 +1071,15 @@ async function injectAppUpdateBanner(): Promise<void> {
       })
       banner.querySelector('[data-action="close"]').addEventListener('click', function () {
         banner.remove()
-        var selectors = ['[data-dsh-github-link]', '[data-dsh-update-check]']
-        var banners = document.querySelector('[data-dsh-update-banners]')
-        var bannerHeight = banners ? banners.offsetHeight : 0
-        for (var i = 0; i < selectors.length; i++) {
-          var el = document.querySelector(selectors[i])
-          if (el) el.style.top = (16 + bannerHeight) + 'px'
-        }
       })
 
       container.appendChild(banner)
-      var selectors = ['[data-dsh-github-link]', '[data-dsh-update-check]']
-      for (var i = 0; i < selectors.length; i++) {
-        var el = document.querySelector(selectors[i])
-        if (el) el.style.top = (16 + container.offsetHeight) + 'px'
-      }
     })()
   `
   try {
-    await mainWindow.webContents.executeJavaScript(bannerCode)
-    await adjustFloatingIconsPosition()
+    await dshView.webContents.executeJavaScript(bannerCode)
   } catch (err) {
     console.warn(`[DSH] 注入客户端更新横幅失败: ${(err as Error).message}`)
-  }
-}
-
-/**
- * 向 DSH UI 注入右上角 GitHub 仓库链接图标
- *
- * 图标可点击，点击后调用 window.dsh.openExternal 在系统默认浏览器打开仓库。
- * 注入前先判断图标是否已存在，避免重复注入。
- * 若页面顶部已有更新横幅，图标会自动下移，避免被横幅遮挡。
- */
-async function injectGitHubLink(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (!isDshPageLoaded()) return
-  const linkCode = `
-    (function () {
-      if (document.querySelector('[data-dsh-github-link]')) {
-        return
-      }
-      var link = document.createElement('div')
-      link.setAttribute('data-dsh-github-link', '')
-      link.title = '查看 GitHub 仓库'
-      var bannerHeight = 0
-      var banners = document.querySelector('[data-dsh-update-banners]')
-      if (banners) bannerHeight = banners.offsetHeight
-      link.style.cssText = 'position: fixed; top: ' + (16 + bannerHeight) + 'px; right: 16px; z-index: 2147483647; width: 40px; height: 40px; border-radius: 20px; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.3);'
-      link.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 16 16" fill="#fff"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>'
-      link.addEventListener('click', function () {
-        if (window.dsh && typeof window.dsh.openExternal === 'function') {
-          window.dsh.openExternal('${GITHUB_REPO_URL}')
-        }
-      })
-      document.body.appendChild(link)
-    })()
-  `
-  try {
-    await mainWindow.webContents.executeJavaScript(linkCode)
-  } catch (err) {
-    console.warn(`[DSH] 注入 GitHub 仓库链接失败: ${(err as Error).message}`)
   }
 }
 
@@ -736,6 +1101,9 @@ app.whenReady().then(() => {
   console.log(`[DSH] AppUserModelID = ${app.getPath('exe')} | AUMID=com.dsh.desktop`)
   // 一次性：清理旧版本下载到安装目录下的遗留安装包
   cleanupLegacyInstallers()
+  // 注册主题模块：窗口获取器 + 注入组件同步回调；监听系统明暗变化（「跟随系统」时生效）
+  registerThemeHooks(() => ({ mainWindow, dshView }), () => syncInjectedTheme())
+  registerNativeThemeListener()
   createWindow()
   void startDshAndLoad()
   // 启动 DSH 更新定时轮询（每 6 小时，仅在打包环境生效）
@@ -812,8 +1180,52 @@ ipcMain.handle('check-update', async () => {
 // 由 loading.html 加载时调用，用于显示应用版本
 ipcMain.handle('get-app-version', async () => app.getVersion())
 
+// 获取应用图标 data URL（标题栏左侧图标显示用）
+// 读取 getWindowIconPath()（dev: build/icon.ico / 打包: resources/icon.ico），
+// nativeImage 缩放到 32x32 后转 PNG data URL（高 DPI 下 16 CSS px 实际渲染 32 物理像素）。
+// 走 data URL 规避两种环境的路径问题：dev 页面在 localhost 引用不到 build/ 目录、
+// 打包后页面在 asar 内而图标在 asar 外。失败返回空串（页面侧隐藏图标，不影响其他功能）。
+ipcMain.handle('get-app-icon', (event) => {
+  if (!isTrustedSender(event)) {
+    return ''
+  }
+  try {
+    const icon = nativeImage.createFromPath(getWindowIconPath())
+    if (icon.isEmpty()) return ''
+    return icon.resize({ width: 32 }).toDataURL()
+  } catch {
+    return ''
+  }
+})
+
+// 获取当前外观设置与生效主题（设置菜单勾选态 / 页面主题初始化使用）
+ipcMain.handle('get-theme', async (event) => {
+  if (!isTrustedSender(event)) {
+    return { setting: 'system' as const, effective: getEffectiveTheme() }
+  }
+  return { setting: getThemeSetting(), effective: getEffectiveTheme() }
+})
+
+// 同步获取生效主题：供 preload 在 document_start 时机为页面打 data-theme 标，
+// 实现首屏无闪烁（主/内容视图的每个页面加载都会经过）。仅返回字符串，无阻塞风险。
+ipcMain.on('get-theme-sync', (event) => {
+  event.returnValue = getEffectiveTheme()
+})
+
+// 更新外观设置：白名单校验 + 来源守卫，持久化后立即应用（overlay / 广播 / emulateMedia / 注入组件同步）
+ipcMain.handle('set-theme', async (event, setting: unknown) => {
+  if (!isTrustedSender(event)) {
+    return { success: false, error: '不受信任的调用来源' }
+  }
+  if (setting !== 'light' && setting !== 'dark' && setting !== 'system') {
+    return { success: false, error: '非法的主题设置值' }
+  }
+  setThemeSetting(setting)
+  return { success: true }
+})
+
 // 在系统默认浏览器中打开外部链接
-// 由 DSH UI 中的 GitHub 图标触发，仅允许 http(s) 协议
+// 由 DSH UI 中的 GitHub 图标 / 关于模态框触发，仅允许 http(s) 协议
 ipcMain.handle('open-external', async (event, url: string) => {
   if (!isTrustedSender(event)) {
     return { success: false, error: '不受信任的调用来源' }
@@ -866,41 +1278,97 @@ ipcMain.on('install-update', async (event) => {
 })
 
 /**
- * 手动检查更新菜单
+ * 帮助菜单事件
  *
- * 由 DSH UI 右上角"检查更新"图标触发。弹原生 dialog 让用户选择检查项，
- * 再串行执行对应手动检查函数（避免 dialog 重叠）。
- * 受 isCheckingUpdate 互斥锁保护，防止快速点击重复触发。
+ * 由标题栏「帮助」按钮触发。仅信任主窗口 webContents（标题栏页面加载于此）的调用；
+ * 按钮位置（标题栏页面内 CSS 像素）直接作为窗口相对坐标传入 Menu.popup，
+ * 在按钮正下方弹出原生菜单：
+ * - 检查更新... → 弹 dialog 选择检查项（原有检查逻辑不变）
+ * - 更新日志 → 子菜单：DSH 运行包日志 / DSH Desktop 客户端日志
+ * - 关于 DSH Desktop → 关于模态框（客户端版本 + DSH 运行包版本 + GitHub 仓库）
  */
-ipcMain.on('show-update-menu', async (event) => {
-  if (!isTrustedSender(event)) return
+ipcMain.on('show-help-menu', (event, position: { x: number; y: number; width: number }) => {
   if (!mainWindow || mainWindow.isDestroyed()) return
-  if (isCheckingUpdate) return
-  isCheckingUpdate = true
-  try {
-    const choice = await dialog.showMessageBox(mainWindow, {
-      type: 'question',
-      title: '检查更新',
-      message: '请选择要检查的项目',
-      buttons: ['检查 DSH 运行包', '检查 DSH Desktop 客户端', '全部检查', '取消'],
-      defaultId: 2,
-      cancelId: 3
-    })
-    if (choice.response === 3) return // 取消
+  // 仅信任主窗口 webContents（标题栏页面加载于此；内容视图 dshView 虽然也持有
+  // 同一 preload，但比对 sender 可确保只有标题栏页面能触发菜单弹出）
+  if (event.sender !== mainWindow.webContents) return
+  if (
+    typeof position !== 'object' || position === null ||
+    typeof position.x !== 'number' || typeof position.y !== 'number'
+  ) return
 
-    if (choice.response === 0) {
-      await manualCheckDshUpdate()
-    } else if (choice.response === 1) {
-      await manualCheckAppUpdate()
-    } else if (choice.response === 2) {
-      // 全部检查：串行执行，第一个 dialog 关闭后再弹第二个
-      await manualCheckDshUpdate()
-      if (!mainWindow || mainWindow.isDestroyed()) return
-      await manualCheckAppUpdate()
+  const menu = Menu.buildFromTemplate([
+    {
+      label: '检查更新...',
+      click: () => { void showUpdateCheckChoiceDialog() }
+    },
+    {
+      label: '更新日志',
+      submenu: [
+        { label: 'DSH 运行包日志', click: () => { void showChangelog('dsh') } },
+        { label: 'DSH Desktop 客户端日志', click: () => { void showChangelog('app') } }
+      ]
+    },
+    { type: 'separator' },
+    { label: '关于 DSH Desktop', click: () => { void showAboutModal() } }
+  ])
+
+  // 菜单关闭后通知标题栏页面复位「帮助」按钮的 hover/active 类：
+  // 原生菜单弹出期间渲染进程收不到鼠标事件，关闭后若鼠标已移出按钮，
+  // 页面侧的交互态会残留（标题栏仅 48px 高，下方是独立 webContents，不会自动清除）。
+  // menu-will-close 覆盖全部关闭路径：Esc / 点击菜单外部 / 选中菜单项。
+  menu.once('menu-will-close', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (!mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('help-menu-closed')
     }
-  } finally {
-    isCheckingUpdate = false
-  }
+  })
+
+  // 坐标系陷阱（实测：Electron 33 / Windows / 200% DPI）：popup 的 x/y 被 按「窗口客户区
+  // 相对坐标」解释，而非官方文档声称的屏幕坐标。若叠加 getContentBounds() 偏移，
+  // 最大化时碰巧正确（窗口原点≈屏幕原点），窗口化时菜单会向右下偏移恰好等于
+  // 窗口自身的屏幕位置。因此直接传按钮在标题栏页面内的坐标（见 AGENTS.md §12.2 第 23 条）。
+  menu.popup({
+    window: mainWindow,
+    x: Math.round(position.x),
+    y: Math.round(position.y + 4)
+  })
+})
+
+/**
+ * 设置菜单事件
+ *
+ * 由标题栏「设置」按钮触发。守卫与坐标规则与 show-help-menu 一致：
+ * 仅信任主窗口 webContents（标题栏页面加载于此），按钮页内坐标直传。
+ * 菜单本体为自定义多级浮层（设置 → 外观 → 明暗模式 → 系统/浅色/深色），
+ * 由透明 WebContentsView（menu.html）承载叠加在内容区上方；
+ * 主题选择、点击外部、Esc 均由 menu.html 经 preload 回传关闭。
+ */
+ipcMain.on('show-settings-menu', (event, position: { x: number; y: number; width: number }) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (event.sender !== mainWindow.webContents) return
+  if (
+    typeof position !== 'object' || position === null ||
+    typeof position.x !== 'number' || typeof position.y !== 'number'
+  ) return
+  showSettingsMenuView(position)
+})
+
+/**
+ * 设置菜单关闭请求：选中主题项 / 点击面板外部 / Esc 由 menu.html 上报，
+ * 标题栏页面与内容视图（打开菜单时注入的一次性监听）检测到外部点击也会上报。
+ * 主题切换本身由 menu.html 直接调 set-theme，这里只负责关菜单。
+ */
+ipcMain.on('settings-menu-outside', (event) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (
+    event.sender !== mainWindow.webContents &&
+    event.sender !== menuView?.webContents &&
+    event.sender !== dshView?.webContents
+  ) return
+  // 菜单未打开（内容视图残留监听的延迟上报）则忽略
+  if (!menuView || !mainWindow.contentView.children.includes(menuView)) return
+  hideSettingsMenuView()
 })
 
 // 所有窗口关闭时退出应用（macOS 除外），并清理 DSH 进程

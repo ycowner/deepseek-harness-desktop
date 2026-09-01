@@ -9,6 +9,29 @@
     />
     <title>DSH Desktop - 加载中</title>
     <style>
+      /* 主题变量：默认浅色；<html data-theme="dark"> 时覆盖为深色（即出厂配色）。
+         data-theme 由 preload 在 document_start 同步打标（首屏无闪烁），
+         运行中切换由页面脚本订阅 theme-changed 更新 */
+      :root {
+        --bg: #ffffff;
+        --text: #333333;
+        --status: #555555;
+        --hint: #8a8a94;
+        --version: #a0a0aa;
+        --spinner-track: rgba(0, 0, 0, 0.08);
+        --accent: #3498db;
+      }
+
+      :root[data-theme='dark'] {
+        --bg: #1a1a2e;
+        --text: #e0e0e0;
+        --status: #b0b0b0;
+        --hint: #707080;
+        --version: #505060;
+        --spinner-track: rgba(255, 255, 255, 0.1);
+        --accent: #3498db;
+      }
+
       /* 全局重置 */
       * {
         margin: 0;
@@ -22,8 +45,8 @@
       }
 
       body {
-        background: #1a1a2e;
-        color: #e0e0e0;
+        background: var(--bg);
+        color: var(--text);
         font-family: system-ui, -apple-system, sans-serif;
         display: flex;
         align-items: center;
@@ -40,8 +63,8 @@
       .spinner {
         width: 64px;
         height: 64px;
-        border: 6px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #3498db;
+        border: 6px solid var(--spinner-track);
+        border-top-color: var(--accent);
         border-radius: 50%;
         margin: 0 auto 24px;
         animation: spin 1s linear infinite;
@@ -55,7 +78,7 @@
 
       .status {
         font-size: 1rem;
-        color: #b0b0b0;
+        color: var(--status);
         min-height: 1.5em;
         line-height: 1.5;
         word-break: break-word;
@@ -63,13 +86,13 @@
 
       .hint {
         font-size: 0.85rem;
-        color: #707080;
+        color: var(--hint);
         margin-top: 24px;
       }
 
       .version {
         font-size: 0.8rem;
-        color: #505060;
+        color: var(--version);
         margin-top: 16px;
       }
     </style>
@@ -83,6 +106,16 @@
       <div class="version" id="app-version">应用版本: 获取中...</div>
     </div>
     <script>
+      // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
+      // （首屏打标由 preload 在 document_start 同步完成，此处仅处理运行中切换）
+      ;(function () {
+        if (window.dsh && typeof window.dsh.onThemeChanged === 'function') {
+          window.dsh.onThemeChanged(function (info) {
+            document.documentElement.dataset.theme = info.effective
+          })
+        }
+      })()
+
       // 订阅主进程发送的状态更新（由 preload 暴露的 window.dsh.onStatus）
       ;(function () {
         if (window.dsh && typeof window.dsh.onStatus === 'function') {

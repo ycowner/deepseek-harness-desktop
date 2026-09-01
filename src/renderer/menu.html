@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    />
+    <title>DSH Desktop - 设置菜单</title>
+    <style>
+      /* 主题变量：默认浅色；<html data-theme="dark"> 时覆盖为深色。
+         data-theme 由 preload 在 document_start 同步打标（与其他页面同一机制），
+         菜单每次打开都重新加载，天然拿到当前主题 */
+      :root {
+        --panel-bg: #f5f5f5;
+        --panel-border: rgba(0, 0, 0, 0.1);
+        --panel-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
+        --text: #1f1f1f;
+        --hover: rgba(0, 0, 0, 0.08);
+        --muted: #8a8a8a;
+      }
+
+      :root[data-theme='dark'] {
+        --panel-bg: #202020;
+        --panel-border: rgba(255, 255, 255, 0.08);
+        --panel-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+        --text: #e0e0e0;
+        --hover: rgba(255, 255, 255, 0.1);
+        --muted: #9ca3af;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      /* 页面背景透明：视图 bounds 由主进程给定，面板之外的区域可透视到下方内容 */
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        user-select: none;
+      }
+
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 13px;
+        color: var(--text);
+      }
+
+      /* 面板：三级面板各自绝对定位，由脚本按层级关系摆放（根 → 二级在右侧 → 三级在二级下方） */
+      .panel {
+        position: absolute;
+        display: none;
+        min-width: 190px;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        box-shadow: var(--panel-shadow);
+        padding: 4px;
+      }
+
+      .panel.open {
+        display: block;
+      }
+
+      .menu-item {
+        display: flex;
+        align-items: center;
+        height: 30px;
+        padding: 0 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .menu-item.is-hover {
+        background: var(--hover);
+      }
+
+      .menu-item .label {
+        flex: 1;
+      }
+
+      /* 右侧箭头：表示该项还有下一级面板 */
+      .menu-item .arrow {
+        margin-left: 22px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      /* 对勾位：未选中项保留等宽占位，保证各级文字左对齐 */
+      .menu-item .check {
+        width: 16px;
+        flex: none;
+        margin-right: 4px;
+        color: var(--text);
+      }
+
+      /* 根面板的分组标题（不可交互） */
+      .panel-head {
+        padding: 6px 10px 4px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 根面板：设置按钮弹出的一级菜单 -->
+    <div class="panel" id="panel-root">
+      <div class="panel-head">设置</div>
+      <div class="menu-item" id="item-appearance">
+        <span class="label">外观</span><span class="arrow">›</span>
+      </div>
+    </div>
+
+    <!-- 二级面板：外观的分组 -->
+    <div class="panel" id="panel-appearance">
+      <div class="menu-item" id="item-theme-mode">
+        <span class="label">明暗模式</span><span class="arrow">›</span>
+      </div>
+    </div>
+
+    <!-- 三级面板：明暗模式选项，当前设置值带 ✓ -->
+    <div class="panel" id="panel-theme">
+      <div class="menu-item theme-opt" data-value="system">
+        <span class="check"></span><span class="label">系统</span>
+      </div>
+      <div class="menu-item theme-opt" data-value="light">
+        <span class="check"></span><span class="label">浅色</span>
+      </div>
+      <div class="menu-item theme-opt" data-value="dark">
+        <span class="check"></span><span class="label">深色</span>
+      </div>
+    </div>
+
+    <script>
+      // 面板引用与布局常量（主进程按 626x94 的视图尺寸定位，勿单独改动）
+      var panelRoot = document.getElementById('panel-root')
+      var panelAppearance = document.getElementById('panel-appearance')
+      var panelTheme = document.getElementById('panel-theme')
+      var GAP = 6
+
+      // 摆放并打开面板（显示前定位，避免闪烁）
+      function openPanel(panel, left, top) {
+        panel.style.left = left + 'px'
+        panel.style.top = top + 'px'
+        panel.classList.add('open')
+      }
+
+      function closePanel(panel) {
+        panel.classList.remove('open')
+      }
+
+      // 根面板：打开即显示「设置 → 外观」
+      function showRoot() {
+        openPanel(panelRoot, 0, 0)
+      }
+
+      // 二级面板：展开于「外观」项右侧
+      function showAppearance() {
+        var r = document.getElementById('item-appearance').getBoundingClientRect()
+        openPanel(panelAppearance, r.right + GAP, r.top - 5)
+        closePanel(panelTheme)
+      }
+
+      // 三级面板：展开于「明暗模式」项的右下侧（不遮挡二级面板其余项）
+      function showTheme() {
+        var r = document.getElementById('item-theme-mode').getBoundingClientRect()
+        openPanel(panelTheme, r.right + GAP, r.bottom - 1)
+      }
+
+      // 交互态：用类名管理而非伪类（与标题栏按钮同一设计，复位可控）
+      function wireHover(el) {
+        el.addEventListener('mouseenter', function () {
+          el.classList.add('is-hover')
+        })
+        el.addEventListener('mouseleave', function () {
+          el.classList.remove('is-hover')
+        })
+      }
+
+      function wireAll() {
+        Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), wireHover)
+
+        document.getElementById('item-appearance').addEventListener('mouseenter', showAppearance)
+        document.getElementById('item-theme-mode').addEventListener('mouseenter', showTheme)
+
+        // 鼠标移回根面板时收起已展开的下级面板
+        panelRoot.addEventListener('mouseenter', function () {
+          closePanel(panelAppearance)
+          closePanel(panelTheme)
+        })
+
+        // 三级面板点击：更新外观设置并关闭菜单（主进程应用主题 + 移除视图 + 复位按钮态）
+        Array.prototype.forEach.call(document.querySelectorAll('.theme-opt'), function (el) {
+          el.addEventListener('click', function () {
+            if (window.dsh && typeof window.dsh.setTheme === 'function') {
+              window.dsh.setTheme(el.getAttribute('data-value'))
+            }
+            if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+              window.dsh.sendSettingsMenuOutside()
+            }
+          })
+        })
+
+        // 点击菜单面板之外：关闭菜单（主进程据此移除菜单视图）
+        document.addEventListener('mousedown', function (e) {
+          if (!e.target.closest('.panel')) {
+            if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+              window.dsh.sendSettingsMenuOutside()
+            }
+          }
+        })
+
+        // Esc 关闭
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape' && window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
+            window.dsh.sendSettingsMenuOutside()
+          }
+        })
+      }
+
+      // 当前设置值的 ✓ 对勾：每次打开都重新加载本页面，加载时向主进程查询最新设置打标。
+      // 不走 theme-changed 广播：本页面每次打开即重建，无需运行中同步。
+      function markCurrentTheme() {
+        if (window.dsh && typeof window.dsh.getTheme === 'function') {
+          window.dsh.getTheme().then(function (info) {
+            Array.prototype.forEach.call(document.querySelectorAll('.theme-opt'), function (el) {
+              var check = el.querySelector('.check')
+              if (check) check.textContent = el.getAttribute('data-value') === info.setting ? '✓' : ''
+            })
+          })
+        }
+      }
+
+      // 每次打开都会重新加载本页面，加载完成后直接展开根面板并打 ✓
+      showRoot()
+      wireAll()
+      markCurrentTheme()
+    </script>
+  </body>
+</html>

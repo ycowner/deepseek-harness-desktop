@@ -9,6 +9,31 @@
     />
     <title>DSH Desktop - 启动失败</title>
     <style>
+      /* 主题变量：默认浅色；<html data-theme="dark"> 时覆盖为深色（即出厂配色）。
+         data-theme 由 preload 在 document_start 同步打标（首屏无闪烁），
+         运行中切换由页面脚本订阅 theme-changed 更新 */
+      :root {
+        --bg: #ffffff;
+        --text: #333333;
+        --heading: #111111;
+        --detail-bg: #f6f7f9;
+        --detail-border: #d9dde3;
+        --detail-text: #333333;
+        --progress-text: #1d6fb8;
+        --btn-disabled: #b8c4d0;
+      }
+
+      :root[data-theme='dark'] {
+        --bg: #1a1a2e;
+        --text: #e0e0e0;
+        --heading: #ffffff;
+        --detail-bg: #0f0f1e;
+        --detail-border: #2a2a3e;
+        --detail-text: #d0d0d0;
+        --progress-text: #5dade2;
+        --btn-disabled: #2c3e50;
+      }
+
       /* 全局重置 */
       * {
         margin: 0;
@@ -22,8 +47,8 @@
       }
 
       body {
-        background: #1a1a2e;
-        color: #e0e0e0;
+        background: var(--bg);
+        color: var(--text);
         font-family: system-ui, -apple-system, sans-serif;
         display: flex;
         align-items: center;
@@ -53,20 +78,20 @@
 
       .title {
         font-size: 1.5rem;
-        color: #ffffff;
+        color: var(--heading);
         margin-bottom: 1.5rem;
       }
 
-      /* 错误详情：深色代码块 */
+      /* 错误详情：代码块配色随主题 */
       .detail {
-        background: #0f0f1e;
-        border: 1px solid #2a2a3e;
+        background: var(--detail-bg);
+        border: 1px solid var(--detail-border);
         border-radius: 6px;
         padding: 1rem;
         text-align: left;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 0.85rem;
-        color: #d0d0d0;
+        color: var(--detail-text);
         margin-bottom: 2rem;
         white-space: pre-wrap;
         word-break: break-all;
@@ -97,7 +122,7 @@
       }
 
       .retry-btn:disabled {
-        background: #2c3e50;
+        background: var(--btn-disabled);
         cursor: not-allowed;
       }
 
@@ -124,7 +149,7 @@
       }
 
       .repair-btn:disabled {
-        background: #2c3e50;
+        background: var(--btn-disabled);
         cursor: not-allowed;
       }
 
@@ -136,16 +161,16 @@
         gap: 0.5rem;
       }
 
-      /* 修复进度区域（默认隐藏） */
+      /* 修复进度区域（默认隐藏，配色随主题） */
       .progress-box {
-        background: #0f0f1e;
-        border: 1px solid #2a2a3e;
+        background: var(--detail-bg);
+        border: 1px solid var(--detail-border);
         border-radius: 6px;
         padding: 0.75rem 1rem;
         text-align: left;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 0.85rem;
-        color: #5dade2;
+        color: var(--progress-text);
         margin-bottom: 1rem;
         max-height: 160px;
         overflow: auto;
@@ -176,6 +201,16 @@
       </div>
     </div>
     <script>
+      // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
+      // （首屏打标由 preload 在 document_start 同步完成，此处仅处理运行中切换）
+      ;(function () {
+        if (window.dsh && typeof window.dsh.onThemeChanged === 'function') {
+          window.dsh.onThemeChanged(function (info) {
+            document.documentElement.dataset.theme = info.effective
+          })
+        }
+      })()
+
       ;(function () {
         var detailEl = document.getElementById('detail')
         var retryBtn = document.getElementById('retry')
