@@ -142,7 +142,11 @@ const NPM_INSTALL_TIMEOUT = 300_000
  * 到 `installDir/node_modules/`。这正是 `preinstall-dsh.js` 走 npx 流程的成功路径。
  *
  * 优先使用国内镜像（npmmirror）加速依赖下载，失败回退到 npm registry（npmjs.org）。
- * 添加 --prefer-offline 让 npm 优先使用本地缓存，配合复用旧 node_modules 实现增量更新。
+ * 注意：不能传 --prefer-offline。该标志下 npm 仅在缓存 miss 时才联网，已存在的
+ * packument 缓存条目即使过期也原样复用（不重验证），会解析不到上游新发布的版本
+ * 并报 ETARGET，且重试无法自愈（实测踩坑：2026-09 更新 0.1.2-rc.1 失败即因此）。
+ * 元数据走 npm 默认缓存策略（过期条件重验证），提速靠 tarball 内容寻址缓存与
+ * 复用旧 node_modules 增量安装。
  *
  * @param tgzPath DSH 包 tgz 文件路径
  * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
@@ -185,15 +189,15 @@ function installDshFromTarballWithRegistry(
     // --no-save：不修改 installDir 的 package.json（installDir 本就是空的，无需记录依赖）
     // --omit=dev：DSH 的 devDependencies 是构建期工具，运行时不需要
     // --registry：指定 npm registry（国内镜像或国外源）
-    // --prefer-offline：优先用本地 npm 缓存，配合复用旧 node_modules 加速增量安装
+    // 不传 --prefer-offline：元数据过期时按 npm 默认策略条件重验证，防止陈旧
+    // packument 缓存导致 ETARGET（tarball 为内容寻址缓存，命中时不重复下载）
     const child = spawn(
       getNodeBinaryPath(),
       [
         npmCli, 'install', tgzPath,
         '--omit=dev', '--no-save', '--no-audit', '--no-fund',
         '--loglevel=warn',
-        '--registry=' + registry,
-        '--prefer-offline'
+        '--registry=' + registry
       ],
       {
         cwd: installDir,
@@ -262,6 +266,8 @@ function installDshFromTarballWithRegistry(
           reject(new Error(`npm 安装失败: 权限不足，无法写入缓存目录。请检查杀毒软件或手动删除旧缓存后重试。\n${errMsg}`))
         } else if (combinedMsg.includes('etimedout') || combinedMsg.includes('econnreset') || combinedMsg.includes('network')) {
           reject(new Error(`npm 安装失败: 网络连接异常。请检查网络后重试。\n${errMsg}`))
+        } else if (combinedMsg.includes('notarget') || combinedMsg.includes('etarget')) {
+          reject(new Error(`npm 安装失败: 依赖的目标版本在 registry 中不存在（上游可能尚未发布或镜像未同步），请稍后重试。\n${errMsg}`))
         } else {
           reject(new Error(`npm 安装失败 (退出码 ${code})\n${errMsg}`))
         }
@@ -400,7 +406,7 @@ export async function prepareDshPackage(
     report('完整性校验通过')
 
     // 5. 复用缓存目录中已有的旧版 node_modules，让 npm install 走增量更新
-    // （配合 --prefer-offline 最大化提速；npm 会自动覆盖 @deepseek-ai/dsh 旧版本）
+    // （配合 tarball 内容寻址缓存最大化提速；npm 会自动覆盖 @deepseek-ai/dsh 旧版本）
     const existingNodeModules = join(cacheDir, 'dsh', 'node_modules')
     if (existsSync(existingNodeModules)) {
       report('检测到旧版本依赖缓存，复用以加速安装...')

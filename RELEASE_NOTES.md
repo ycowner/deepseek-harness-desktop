@@ -2,6 +2,25 @@
 
 ---
 
+# Release Notes — DSH Desktop v1.0.7
+
+## 🐛 问题修复
+
+- **修复 DSH 运行包更新因 npm 本地陈旧缓存必然失败的问题**：更新时 `npm install` 报 `ETARGET（No matching version found）` 退出码 1，且重试无法自愈。根因是更新流程传了 `--prefer-offline`，npm 对已过期的包元数据缓存不做重验证直接复用，导致解析不到上游新发布的版本。现已移除该参数，恢复 npm 默认元数据重验证策略（tarball 仍走内容寻址缓存、旧依赖复用增量安装，更新速度基本不受影响）。
+- **npm 依赖解析失败提示更友好**：出现 `ETARGET/notarget` 时提示「依赖的目标版本在 registry 中不存在（上游可能尚未发布或镜像未同步），请稍后重试」。
+
+## 📦 安装包
+
+| 文件                             | 说明                         |
+| ------------------------------ | -------------------------- |
+| `DSH-Desktop-Setup-1.0.7.exe` | Windows x64 安装程序，需以管理员权限运行 |
+
+## ⚠️ 老版本升级提示
+
+- ≤1.0.6 版本如遇 DSH 更新报 `ETARGET` 失败，可删除 `%LOCALAPPDATA%\DSH Desktop\npm-cache\_cacache` 目录（纯缓存、可再生）后重试更新即可恢复；或直接升级到本版本。
+
+---
+
 # Release Notes — DSH Desktop v1.0.6
 
 ## 🚀 更新内容
