@@ -2,7 +2,7 @@ import { app, BrowserWindow, WebContentsView, Menu, shell, ipcMain, nativeImage,
 import { join } from 'path'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
 import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
-import { checkForUpdate, getInstalledDshVersion, isValidVersion } from './dsh-version'
+import { checkForUpdate, getInstalledDshVersion, isValidVersion, compareVersions } from './dsh-version'
 import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, fetchGitHubLatest } from './app-update'
 import { fetchDshChangelogs, fetchAppChangelogs, renderMarkdownToHtml, escapeHtml, ChangelogEntry } from './changelog'
 import { getThemeSetting, setThemeSetting, getEffectiveTheme, getOverlayColors, registerThemeHooks, registerNativeThemeListener, applyEmulateMedia } from './theme-manager'
@@ -16,14 +16,6 @@ let mainWindow: BrowserWindow | null = null
 
 // 内容视图（loading / error / DSH Web UI 全部加载于此，覆盖标题栏以下全部区域）
 let dshView: WebContentsView | null = null
-
-// 设置菜单浮层视图（自定义多级菜单，需要时叠加到内容区上方，标题栏仅 48px 高
-// 无法在其页面内向下弹出，故用独立透明视图承载）
-let menuView: WebContentsView | null = null
-
-// 设置菜单浮层的视图尺寸（与 menu.html 三级面板的展开布局一致，勿单独改动）
-const SETTINGS_MENU_WIDTH = 626
-const SETTINGS_MENU_HEIGHT = 160
 
 // 标记是否正在执行启动流程（防止重试重复触发）
 let isStarting = false
@@ -258,7 +250,9 @@ function syncInjectedTheme(): void {
 async function manualCheckDshUpdate(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return
   try {
-    const result = await checkForUpdate()
+    // includeGitHub：手动检查附加查询上游 GitHub Releases，
+    // 用于「GitHub 已发布但 npm 未发布」的告知（自动路径不查）
+    const result = await checkForUpdate({ includeGitHub: true })
     if (result.error) {
       await dialog.showMessageBox(mainWindow, {
         type: 'warning',
@@ -282,11 +276,17 @@ async function manualCheckDshUpdate(): Promise<void> {
         defaultId: 0
       })
     } else {
+      // GitHub 有更新但 npm 未发布（npm latest 旧于 GitHub latest）：
+      // 该版本当前不可安装，对话框附加告知，不判定为可更新
+      const ghVersion = result.githubLatestVersion
+      const ghNewerThanNpm = ghVersion !== undefined && compareVersions(result.latestVersion, ghVersion) < 0
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
-        title: '已是最新版本',
-        message: 'DSH 运行包已是最新版本',
-        detail: `当前版本: v${result.currentVersion}\n最新版本: v${result.latestVersion}`,
+        title: ghNewerThanNpm ? '已是最新可安装版本' : '已是最新版本',
+        message: ghNewerThanNpm ? 'DSH 运行包已是最新可安装版本' : 'DSH 运行包已是最新版本',
+        detail: ghNewerThanNpm
+          ? `当前版本: v${result.currentVersion}\n最新可安装版本（npm）: v${result.latestVersion}\n\n上游 GitHub 已发布 v${ghVersion}，但该版本尚未发布到 npm，暂无法自动更新。上游发布到 npm 后，客户端将自动提示更新。`
+          : `当前版本: v${result.currentVersion}\n最新版本: v${result.latestVersion}`,
         buttons: ['确定'],
         defaultId: 0
       })
@@ -667,10 +667,8 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
-  // 窗口尺寸变化（resize / 最大化 / 还原）时同步视图布局；
-  // 设置菜单浮层的坐标是打开时一次性计算的，尺寸变化直接关闭避免错位
+  // 窗口尺寸变化（resize / 最大化 / 还原）时同步视图布局
   mainWindow.on('resize', () => {
-    hideSettingsMenuView()
     layoutViews()
   })
 
@@ -698,102 +696,7 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null
     dshView = null
-    menuView = null
   })
-}
-
-/**
- * 确保设置菜单浮层视图已创建（懒创建：首次打开设置菜单时）
- *
- * 背景透明：面板之外的区域可透视到下方内容；每次打开前重新加载页面，
- * 以重置展开状态（并天然拿到当前主题的 data-theme 打标）。
- */
-function ensureMenuView(): WebContentsView {
-  if (!menuView) {
-    menuView = new WebContentsView({
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-        transparent: true,
-        preload: join(__dirname, '../preload/index.js')
-      }
-    })
-    // 层叠无需 setZIndex：子视图按加入顺序绘制，menuView 最后 addChildView，
-    // 天然覆盖在标题栏页面与 dshView 之上
-    const base = getRendererBaseUrl()
-    if (base) {
-      void menuView.webContents.loadURL(`${base}/menu.html`)
-    } else {
-      void menuView.webContents.loadFile(join(__dirname, '../renderer/menu.html'))
-    }
-  } else {
-    const base = getRendererBaseUrl()
-    if (base) {
-      void menuView.webContents.loadURL(`${base}/menu.html`)
-    } else {
-      void menuView.webContents.loadFile(join(__dirname, '../renderer/menu.html'))
-    }
-  }
-  return menuView
-}
-
-/**
- * 一次性外部点击上报钩子：菜单打开期间注入内容视图（含 DSH 远程页，
- * preload 同样生效），任意 mousedown 上报关闭并自我移除；
- * 菜单下次打开时重新注入，避免监听残留重复上报。
- */
-const DSH_OUTSIDE_CLICK_HOOK = `(() => {
-  try {
-    if (window.__dshMenuCloser) document.removeEventListener('mousedown', window.__dshMenuCloser, true)
-    const h = () => {
-      document.removeEventListener('mousedown', h, true)
-      window.__dshMenuCloser = null
-      try {
-        if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
-          window.dsh.sendSettingsMenuOutside()
-        }
-      } catch (e) {}
-    }
-    window.__dshMenuCloser = h
-    document.addEventListener('mousedown', h, true)
-  } catch (e) {}
-})()`
-
-/**
- * 打开设置菜单浮层：视图左边缘对齐设置按钮左边缘（根面板在视图内 (0,0)，
- * 即菜单正好出现在设置按钮正下方）、顶部紧贴标题栏下沿，
- * 右侧/底部超出窗口时向内收紧。视图加到 contentView 顶层，覆盖标题栏页面与 dshView。
- */
-function showSettingsMenuView(position: { x: number; y: number; width: number }): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  const view = ensureMenuView()
-  const [winWidth, winHeight] = mainWindow.getContentSize()
-  const left = Math.min(Math.round(position.x), Math.max(0, winWidth - SETTINGS_MENU_WIDTH))
-  const top = Math.min(TITLEBAR_HEIGHT, Math.max(0, winHeight - SETTINGS_MENU_HEIGHT))
-  view.setBounds({ x: left, y: top, width: SETTINGS_MENU_WIDTH, height: SETTINGS_MENU_HEIGHT })
-  mainWindow.contentView.addChildView(view)
-
-  // 菜单浮层只覆盖左上角一小块区域，内容区其余部分的点击仍落在 dshView 上，
-  // 需向内容视图注入一次性 capture mousedown 监听，点击内容区即上报关闭菜单。
-  // 标题栏区域的点击由 titlebar.html 自身的 capture 监听补报。
-  if (dshView && !dshView.webContents.isDestroyed()) {
-    dshView.webContents.executeJavaScript(DSH_OUTSIDE_CLICK_HOOK, true).catch(() => {
-      /* 页面导航中静默忽略 */
-    })
-  }
-}
-
-/**
- * 关闭设置菜单浮层：移除视图并通知标题栏页面复位「设置」按钮交互态。
- * 覆盖全部关闭路径：选中主题项 / 点击外部 / Esc / 窗口 resize 与关闭。
- */
-function hideSettingsMenuView(): void {
-  if (menuView && mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.contentView.removeChildView(menuView)
-  }
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('settings-menu-closed')
-  }
 }
 
 /**
@@ -1198,30 +1101,10 @@ ipcMain.handle('get-app-icon', (event) => {
   }
 })
 
-// 获取当前外观设置与生效主题（设置菜单勾选态 / 页面主题初始化使用）
-ipcMain.handle('get-theme', async (event) => {
-  if (!isTrustedSender(event)) {
-    return { setting: 'system' as const, effective: getEffectiveTheme() }
-  }
-  return { setting: getThemeSetting(), effective: getEffectiveTheme() }
-})
-
 // 同步获取生效主题：供 preload 在 document_start 时机为页面打 data-theme 标，
 // 实现首屏无闪烁（主/内容视图的每个页面加载都会经过）。仅返回字符串，无阻塞风险。
 ipcMain.on('get-theme-sync', (event) => {
   event.returnValue = getEffectiveTheme()
-})
-
-// 更新外观设置：白名单校验 + 来源守卫，持久化后立即应用（overlay / 广播 / emulateMedia / 注入组件同步）
-ipcMain.handle('set-theme', async (event, setting: unknown) => {
-  if (!isTrustedSender(event)) {
-    return { success: false, error: '不受信任的调用来源' }
-  }
-  if (setting !== 'light' && setting !== 'dark' && setting !== 'system') {
-    return { success: false, error: '非法的主题设置值' }
-  }
-  setThemeSetting(setting)
-  return { success: true }
 })
 
 // 在系统默认浏览器中打开外部链接
@@ -1340,9 +1223,9 @@ ipcMain.on('show-help-menu', (event, position: { x: number; y: number; width: nu
  *
  * 由标题栏「设置」按钮触发。守卫与坐标规则与 show-help-menu 一致：
  * 仅信任主窗口 webContents（标题栏页面加载于此），按钮页内坐标直传。
- * 菜单本体为自定义多级浮层（设置 → 外观 → 明暗模式 → 系统/浅色/深色），
- * 由透明 WebContentsView（menu.html）承载叠加在内容区上方；
- * 主题选择、点击外部、Esc 均由 menu.html 经 preload 回传关闭。
+ * 菜单本体为原生 Menu.popup：顶级仅「主题」一项，其子菜单为跟随系统 / 浅色 / 深色
+ * 三个单选项（当前设置值带单选点），选中后由 theme-manager 持久化并立即应用；
+ * 点击外部与 Esc 关闭由原生菜单自行处理。
  */
 ipcMain.on('show-settings-menu', (event, position: { x: number; y: number; width: number }) => {
   if (!mainWindow || mainWindow.isDestroyed()) return
@@ -1351,24 +1234,32 @@ ipcMain.on('show-settings-menu', (event, position: { x: number; y: number; width
     typeof position !== 'object' || position === null ||
     typeof position.x !== 'number' || typeof position.y !== 'number'
   ) return
-  showSettingsMenuView(position)
-})
 
-/**
- * 设置菜单关闭请求：选中主题项 / 点击面板外部 / Esc 由 menu.html 上报，
- * 标题栏页面与内容视图（打开菜单时注入的一次性监听）检测到外部点击也会上报。
- * 主题切换本身由 menu.html 直接调 set-theme，这里只负责关菜单。
- */
-ipcMain.on('settings-menu-outside', (event) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return
-  if (
-    event.sender !== mainWindow.webContents &&
-    event.sender !== menuView?.webContents &&
-    event.sender !== dshView?.webContents
-  ) return
-  // 菜单未打开（内容视图残留监听的延迟上报）则忽略
-  if (!menuView || !mainWindow.contentView.children.includes(menuView)) return
-  hideSettingsMenuView()
+  const setting = getThemeSetting()
+  const menu = Menu.buildFromTemplate([
+    {
+      label: '主题',
+      submenu: [
+        { label: '跟随系统', type: 'radio', checked: setting === 'system', click: () => setThemeSetting('system') },
+        { label: '浅色', type: 'radio', checked: setting === 'light', click: () => setThemeSetting('light') },
+        { label: '深色', type: 'radio', checked: setting === 'dark', click: () => setThemeSetting('dark') }
+      ]
+    }
+  ])
+
+  // 菜单关闭后通知标题栏页面复位「设置」按钮的 hover/active 类（机制与帮助菜单一致）
+  menu.once('menu-will-close', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    if (!mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('settings-menu-closed')
+    }
+  })
+
+  menu.popup({
+    window: mainWindow,
+    x: Math.round(position.x),
+    y: Math.round(position.y + 4)
+  })
 })
 
 // 所有窗口关闭时退出应用（macOS 除外），并清理 DSH 进程

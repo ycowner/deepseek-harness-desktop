@@ -1,5 +1,5 @@
 import { net } from 'electron'
-import { isValidVersion } from './dsh-version'
+import { isValidVersion, DSH_UPSTREAM_OWNER, DSH_UPSTREAM_REPO, DSH_RELEASE_TAG_PREFIX } from './dsh-version'
 
 /**
  * 更新日志模块（数据获取 + 安全 markdown 渲染）
@@ -14,11 +14,7 @@ import { isValidVersion } from './dsh-version'
  *   链接 URL 仅允许 http(s)，防止注入 DSH 页面的 XSS。
  */
 
-// 上游 DSH monorepo（npm 包 @deepseek-ai/dsh 的真实出处）
-const DSH_UPSTREAM_OWNER = 'deepseek-ai'
-const DSH_UPSTREAM_REPO = 'deepseek-harness'
-// 上游 release tag 前缀（monorepo 中 DSH CLI 包的 release 以 'dsh-v' 开头）
-const DSH_RELEASE_TAG_PREFIX = 'dsh-v'
+// 上游 DSH monorepo 常量（owner/repo/tag 前缀）定义在 dsh-version.ts，本模块导入复用
 
 // 本项目（DSH Desktop 客户端）仓库
 const APP_OWNER = 'ycowner'

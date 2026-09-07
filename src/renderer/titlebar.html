@@ -222,16 +222,15 @@
       })()
 
       // 「设置」按钮：交互态管理与复位机制复刻帮助按钮（is-hover / is-active 类名 +
-      // 失焦/聚焦复位 + 菜单关闭通知复位）。菜单为自定义多级浮层（独立视图覆盖在按钮上方），
-      // 打开期间按钮保持 is-active 高亮，直到收到 settings-menu-closed 复位；
-      // 点击后在按钮右下方打开菜单（设置 → 外观 → 明暗模式 → 系统/浅色/深色）
+      // 失焦/聚焦复位 + 菜单关闭通知复位）。菜单为原生菜单（Menu.popup：
+      // 主题 → 跟随系统 / 浅色 / 深色），原生菜单弹出期间渲染进程收不到鼠标事件，
+      // 关闭后若鼠标已移出按钮，伪类状态会滞留且标题栏页面永远不会自动清除
+      // （下方内容区是独立 webContents）。复位时机：窗口失焦/重新聚焦、
+      // 主进程菜单关闭通知（settings-menu-closed）；
+      // 复位后若鼠标仍在按钮上，下一次真实鼠标移动会经 mouseenter 恢复高亮
       ;(function () {
         var btn = document.getElementById('settings-btn')
         if (!btn) return
-
-        // 菜单打开标记：防止重复打开，也供外部点击上报使用
-        var menuOpen = false
-        window.__dshSettingsMenuOpen = function () { return menuOpen }
 
         function resetStates() {
           btn.classList.remove('is-hover')
@@ -241,56 +240,30 @@
         btn.addEventListener('mouseenter', function () {
           btn.classList.add('is-hover')
         })
-        btn.addEventListener('mouseleave', function () {
-          // 菜单打开期间保持 active 高亮，仅清 hover（与原生菜单期间的行为一致）
-          btn.classList.remove('is-hover')
-          if (!menuOpen) btn.classList.remove('is-active')
-        })
+        btn.addEventListener('mouseleave', resetStates)
         btn.addEventListener('mousedown', function () {
           btn.classList.add('is-active')
         })
         btn.addEventListener('mouseup', function () {
-          if (!menuOpen) btn.classList.remove('is-active')
+          btn.classList.remove('is-active')
         })
+
+        // 窗口失焦后鼠标状态不再可信（菜单/对话框抢走输入），重新聚焦时同样先复位，
+        // 交由后续真实鼠标事件重建状态，避免残留
         window.addEventListener('blur', resetStates)
-        window.addEventListener('focus', function () {
-          if (!menuOpen) resetStates()
-        })
+        window.addEventListener('focus', resetStates)
 
         if (window.dsh && typeof window.dsh.onSettingsMenuClosed === 'function') {
-          window.dsh.onSettingsMenuClosed(function () {
-            menuOpen = false
-            resetStates()
-          })
+          window.dsh.onSettingsMenuClosed(resetStates)
         }
 
+        // 点击「设置」：把按钮位置发给主进程，在按钮正下方弹出原生主题菜单（坐标规则与帮助菜单一致）
         btn.addEventListener('click', function () {
-          // 开关切换：菜单已打开时再次点击设置按钮即关闭（上报主进程移除菜单视图，
-          // 主进程随后广播 settings-menu-closed 复位 menuOpen 与按钮交互态）
-          if (menuOpen) {
-            if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
-              window.dsh.sendSettingsMenuOutside()
-            }
-            return
-          }
           if (window.dsh && typeof window.dsh.showSettingsMenu === 'function') {
             var rect = btn.getBoundingClientRect()
-            menuOpen = true
-            btn.classList.add('is-active')
             window.dsh.showSettingsMenu({ x: rect.left, y: rect.bottom, width: rect.width })
           }
         })
-
-        // 菜单打开期间，标题栏页面上的任意点击（拖拽区除外）都视为点击菜单外部：
-        // 菜单浮层从标题栏下沿开始，标题栏区域内的点击不会落在菜单视图上，需由本页面补报。
-        // capture 阶段监听；点击设置按钮自身由上方 click 的切换逻辑处理，不重复上报。
-        window.addEventListener('mousedown', function (e) {
-          if (!menuOpen) return
-          if (e.target === btn) return
-          if (window.dsh && typeof window.dsh.sendSettingsMenuOutside === 'function') {
-            window.dsh.sendSettingsMenuOutside()
-          }
-        }, true)
       })()
     </script>
   </body>

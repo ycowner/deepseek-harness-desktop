@@ -105,33 +105,20 @@ const api = {
   onHelpMenuClosed: (callback: () => void): void => {
     ipcRenderer.on('help-menu-closed', () => callback())
   },
-  // 获取当前外观设置与生效主题（设置菜单勾选态 / 页面主题初始化使用）
-  getTheme: (): Promise<ThemeInfo> => {
-    return ipcRenderer.invoke('get-theme')
-  },
-  // 更新外观设置：浅色 / 深色 / 跟随系统；主进程持久化后立即应用，无需重启
-  setTheme: (setting: 'light' | 'dark' | 'system'): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('set-theme', setting)
-  },
   // 订阅主题变化（用户切换设置或系统明暗变化且处于「跟随系统」时触发；
   // 页面据此更新 data-theme 切换 CSS 变量色板）
   onThemeChanged: (callback: (info: ThemeInfo) => void): void => {
     ipcRenderer.on('theme-changed', (_event, info: ThemeInfo) => callback(info))
   },
   // 触发设置菜单（标题栏「设置」按钮使用，主进程在按钮下方弹出原生菜单：
-  // 外观 → 浅色 / 深色 / 跟随系统）
+  // 主题 → 跟随系统 / 浅色 / 深色）
   showSettingsMenu: (position: { x: number; y: number; width: number }): void => {
     ipcRenderer.send('show-settings-menu', position)
   },
-  // 订阅设置菜单关闭通知（主进程在菜单视图移除时发送；
+  // 订阅设置菜单关闭通知（主进程在 menu-will-close 时发送；
   // titlebar.html 据此复位「设置」按钮的交互态类，机制与帮助按钮一致）
   onSettingsMenuClosed: (callback: () => void): void => {
     ipcRenderer.on('settings-menu-closed', () => callback())
-  },
-  // 上报设置菜单关闭请求（点击面板外部 / Esc / 选中主题项后，
-  // 由 menu.html 与 titlebar.html 调用，主进程移除菜单视图）
-  sendSettingsMenuOutside: (): void => {
-    ipcRenderer.send('settings-menu-outside')
   }
 }
 

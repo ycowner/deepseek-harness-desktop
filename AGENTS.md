@@ -65,7 +65,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   │   ├── index.ts             ← 应用入口、窗口（WCO 标题栏 + 内容子视图）、IPC 路由、帮助菜单、模态框注入
 │   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）
 │   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare staging / activate）
-│   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询
+│   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询、npm 双源并行取最大、GitHub 上游版本信息查询（仅手动检查告知）
 │   │   ├── app-update.ts        ← 客户端更新 GitHub 检测（Release 页面引导、遗留安装包清理）
 │   │   ├── changelog.ts         ← 更新日志获取（上/本项目 GitHub Releases）+ 安全 markdown 渲染
 │   │   └── node-binary.ts       ← 内置 Node 二进制路径解析
@@ -194,7 +194,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 `show-help-menu` 则直接比对 `event.sender === mainWindow.webContents`（更严格：只有标题栏页面能触发）。
 
 **帮助菜单结构**（标题栏「帮助」按钮 → 原生菜单）：
-- 检查更新... → 弹 dialog 选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）
+- 检查更新... → 弹 dialog 选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）。手动检查 DSH 时 `fetchLatestVersion` 并行查 npmmirror 与 npmjs 的 dist-tags 取版本最大者，并附加查询上游 GitHub Releases（`dsh-v*` tag）：若 GitHub 有新版而 npm 未发布，对话框附加「尚未发布到 npm」告知；自动横幅/轮询只认 npm 可安装版本
 - 更新日志 → 子菜单：DSH 运行包日志（上游 `deepseek-ai/deepseek-harness` Releases，tag 前缀 `dsh-v`）/ DSH Desktop 客户端日志（本项目 Releases，tag 前缀 `v`）
 - 关于 DSH Desktop → 模态框（客户端版本号 + DSH 运行包版本号 + GitHub 仓库链接按钮）
 
