@@ -166,9 +166,12 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 4. 就绪后 `mainWindow.loadURL(dshUrl)`；超时则 `loadErrorPage(...)`。
 5. 抛错时若 `err.name === DSH_PACKAGE_MISSING` → 在错误信息末尾追加 `[CODE:DSH_PACKAGE_MISSING]`，错误页面据此显示"在线修复"按钮。
 
-### 5.3 关闭流程
+### 5.3 系统托盘与关闭流程
 
-- `window-all-closed` 事件 → `stopDsh()` → Windows 上用 `taskkill /f /t` 杀整棵进程树（普通 `child.kill()` 杀不掉 npx 派生的子进程）。
+- **系统托盘**（1.0.8 起）：启动后 `createTray()` 创建常驻托盘图标（复用 `getWindowIconPath()`，tooltip "DSH Desktop"，图标加载失败时仅记日志跳过），右键菜单仅两项：「打开主界面」（`showMainWindow()`：恢复/显示/聚焦，窗口已销毁时兜底重建）与「退出」（`confirmAndQuit()`）。
+- **退出确认**：窗口关闭（WCO 关闭按钮 / Alt+F4，由 `mainWindow.on('close')` 拦截 `preventDefault`）与托盘「退出」复用同一 `confirmAndQuit()`：先弹确认框（`isQuitting` 互斥锁防重复弹框），取消则复位锁继续运行；确认后先 `tray.destroy()`（防 Windows 托盘幽灵图标）再 `app.quit()`，第二次 close 事件因 `isQuitting=true` 放行。
+  - 踩坑：渲染层 JS 的 `window.close()`（如 CDP 触发）会绕过 BrowserWindow 的 `close` 事件，无法被拦截；真实用户操作（X 按钮 / Alt+F4）走 WM_CLOSE → `close` 事件，可正常拦截。
+- `window-all-closed` 事件 → 兜底 `tray.destroy()` → `stopDsh()` → Windows 上用 `taskkill /f /t` 杀整棵进程树（普通 `child.kill()` 杀不掉 npx 派生的子进程）。
 - macOS 分支不退出（保留 dock 行为），但当前**未配置 macOS 打包目标**（见 §9）。
 
 ### 5.4 IPC 通道

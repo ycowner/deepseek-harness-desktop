@@ -44,3 +44,5 @@ Thumbs.db
 /*.ps1
 /patch_menu.js
 .trae/*.png
+.qoder-screenshots/
+/_*.png

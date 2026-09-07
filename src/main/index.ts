@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, Menu, shell, ipcMain, nativeImage, dialog } from 'electron'
+import { app, BrowserWindow, WebContentsView, Menu, shell, ipcMain, nativeImage, dialog, Tray } from 'electron'
 import { join } from 'path'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
 import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
@@ -16,6 +16,12 @@ let mainWindow: BrowserWindow | null = null
 
 // 内容视图（loading / error / DSH Web UI 全部加载于此，覆盖标题栏以下全部区域）
 let dshView: WebContentsView | null = null
+
+// 系统托盘实例（必须持有引用，否则被 GC 后托盘图标消失）
+let tray: Tray | null = null
+
+// 退出确认互斥锁（防止重复弹确认框，同时作为「已确认退出」标记）
+let isQuitting = false
 
 // 标记是否正在执行启动流程（防止重试重复触发）
 let isStarting = false
@@ -693,10 +699,101 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // 拦截窗口关闭（标题栏 WCO 关闭按钮 / Alt+F4 / window.close 等全部路径）：
+  // 先弹退出确认框，取消则保持运行；确认后 isQuitting 已置位，
+  // app.quit() 触发的第二次 close 事件直接放行，走既有清理链路
+  // （window-all-closed → 销毁托盘 → stopDsh → 退出）
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return
+    event.preventDefault()
+    void confirmAndQuit()
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
     dshView = null
   })
+}
+
+/**
+ * 恢复、显示并聚焦主窗口（托盘菜单「打开主界面」）
+ *
+ * 覆盖最小化 / 隐藏 / 失焦三种状态；窗口已销毁时兜底重建
+ * （复用 app.on('activate') 中的重建逻辑）。
+ */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    void startDshAndLoad()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/**
+ * 托盘菜单「退出」：先弹确认框，用户明确确认后才执行退出
+ *
+ * 受 isQuitting 互斥锁保护，防止重复触发并发弹框；取消后复位锁，
+ * 客户端继续运行。确认后必须先销毁托盘（否则 Windows 托盘区残留
+ * 幽灵图标），再 app.quit() 走既有清理链路（window-all-closed →
+ * stopDsh 杀 DSH 进程树 → 退出）。
+ */
+async function confirmAndQuit(): Promise<void> {
+  if (isQuitting) return
+  isQuitting = true
+  try {
+    const options: Electron.MessageBoxOptions = {
+      type: 'question',
+      title: '退出确认',
+      message: '确定要退出 DSH Desktop 吗？',
+      buttons: ['退出', '取消'],
+      defaultId: 1,
+      cancelId: 1
+    }
+    // 主窗口可用时挂到窗口上作模态；窗口已关闭的极端场景不传 parent 仍可弹
+    const result = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options)
+    if (result.response !== 0) {
+      // 用户取消：复位锁，保持客户端继续运行
+      isQuitting = false
+      return
+    }
+    if (tray) {
+      tray.destroy()
+      tray = null
+    }
+    app.quit()
+  } catch (err) {
+    console.error(`[DSH] 退出确认流程异常: ${(err as Error).message}`)
+    isQuitting = false
+  }
+}
+
+/**
+ * 创建系统托盘图标（应用启动后常驻，右键弹出原生菜单）
+ *
+ * 菜单仅含两项：「打开主界面」与「退出」。图标复用 getWindowIconPath()
+ * （icon.ico 为多尺寸，Electron 自动选取托盘尺寸）；图标读取失败时
+ * 仅记录日志并跳过托盘创建，不影响其他功能。
+ */
+function createTray(): void {
+  if (tray) return
+  const icon = nativeImage.createFromPath(getWindowIconPath())
+  if (icon.isEmpty()) {
+    console.warn('[DSH] 托盘图标加载失败，跳过托盘创建')
+    return
+  }
+  tray = new Tray(icon)
+  tray.setToolTip('DSH Desktop')
+  console.log('[DSH] 系统托盘图标已创建')
+  // Windows 上 setContextMenu 后右键自动弹出，无需监听 right-click
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开主界面', click: () => { showMainWindow() } },
+    { label: '退出', click: () => { void confirmAndQuit() } }
+  ]))
 }
 
 /**
@@ -1008,6 +1105,7 @@ app.whenReady().then(() => {
   registerThemeHooks(() => ({ mainWindow, dshView }), () => syncInjectedTheme())
   registerNativeThemeListener()
   createWindow()
+  createTray()
   void startDshAndLoad()
   // 启动 DSH 更新定时轮询（每 6 小时，仅在打包环境生效）
   startPeriodicDshUpdateCheck()
@@ -1264,6 +1362,11 @@ ipcMain.on('show-settings-menu', (event, position: { x: number; y: number; width
 
 // 所有窗口关闭时退出应用（macOS 除外），并清理 DSH 进程
 app.on('window-all-closed', async () => {
+  // 兜底销毁托盘：覆盖直接点窗口关闭按钮的退出路径，避免托盘区残留幽灵图标
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
   try {
     await stopDsh()
   } catch (err) {
