@@ -145,8 +145,8 @@ const NPM_INSTALL_TIMEOUT = 300_000
  * 注意：不能传 --prefer-offline。该标志下 npm 仅在缓存 miss 时才联网，已存在的
  * packument 缓存条目即使过期也原样复用（不重验证），会解析不到上游新发布的版本
  * 并报 ETARGET，且重试无法自愈（实测踩坑：2026-09 更新 0.1.2-rc.1 失败即因此）。
- * 元数据走 npm 默认缓存策略（过期条件重验证），提速靠 tarball 内容寻址缓存与
- * 复用旧 node_modules 增量安装。
+ * 元数据走 npm 默认缓存策略（过期条件重验证），提速靠 tarball 内容寻址缓存
+ * （实测 522 个包全量安装仅 24 秒，无需复用旧 node_modules）。
  *
  * @param tgzPath DSH 包 tgz 文件路径
  * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
@@ -328,11 +328,15 @@ export interface PreparedDshPackage {
  * 1. 获取最新版本号（优先国内镜像 npmmirror，失败回退 npm registry）
  * 2. 下载 tgz 到临时目录（双源）
  * 3. 用 npm dist.integrity（sha512）校验 tgz 完整性
- * 4. 复用现有缓存中的旧 node_modules 到安装目录（若存在），加速增量安装
- * 5. 在空目录跑 `npm install <tgz>`（不能在 DSH 包目录里跑，详见
+ * 4. 在空目录跑 `npm install <tgz>`（不能在 DSH 包目录里跑，详见
  *    installDshFromTarball 注释），npm 解压 tgz 并安装全部 dependencies
- * 6. 校验安装产物（lib/bin.js 存在）
- * 7. 复制到 staging 目录 dsh-cache/dsh.staging.<ts>/
+ * 5. 校验安装产物（lib/bin.js 存在）
+ * 6. 复制到 staging 目录 dsh-cache/dsh.staging.<ts>/
+ *
+ * 注意：不复用旧缓存的 node_modules。实测 npm arborist 对复用旧树做增量 diff 时
+ * 会产出不完整依赖树（0.1.2-rc.1：sharp 升到 0.35.4 但其常规依赖 @img/colour
+ * 未落盘），激活后 DSH 启动报 ERR_MODULE_NOT_FOUND。全量 reify 配合 tarball
+ * 内容缓存已足够快（实测 24 秒）。
  *
  * 全程不触碰现有 dsh/ 缓存目录，更新期间旧 DSH 进程可继续运行。
  * 失败时清理 staging 与临时目录，现有缓存不受影响。
@@ -405,36 +409,18 @@ export async function prepareDshPackage(
     await verifyFileIntegrity(tgzPath, integrity)
     report('完整性校验通过')
 
-    // 5. 复用缓存目录中已有的旧版 node_modules，让 npm install 走增量更新
-    // （配合 tarball 内容寻址缓存最大化提速；npm 会自动覆盖 @deepseek-ai/dsh 旧版本）
-    const existingNodeModules = join(cacheDir, 'dsh', 'node_modules')
-    if (existsSync(existingNodeModules)) {
-      report('检测到旧版本依赖缓存，复用以加速安装...')
-      try {
-        copyDir(existingNodeModules, join(installDir, 'node_modules'))
-        report('旧依赖复用完成')
-      } catch (err) {
-        console.warn(`[DSH Repair] 复用旧依赖失败，将全量安装: ${(err as Error).message}`)
-        // 清理可能的部分复制，避免污染后续 npm install
-        const partialNodeModules = join(installDir, 'node_modules')
-        if (existsSync(partialNodeModules)) {
-          try { rmSync(partialNodeModules, { recursive: true, force: true }) } catch { /* 忽略 */ }
-        }
-      }
-    }
-
-    // 6. 在空目录跑 npm install <tgz>
+    // 5. 在空目录跑 npm install <tgz>（不复用旧 node_modules，原因见函数注释）
     report('正在安装 DSH 包及其依赖...')
     await installDshFromTarball(tgzPath, installDir, report)
 
-    // 7. 校验 npm install 产物
+    // 6. 校验 npm install 产物
     const installedDshDir = join(installDir, 'node_modules', '@deepseek-ai', 'dsh')
     if (!existsSync(installedDshDir) || !existsSync(join(installedDshDir, 'lib', 'bin.js'))) {
       throw new Error('npm install 后未找到 DSH 包或 lib/bin.js，安装异常')
     }
     report('DSH 包安装完成')
 
-    // 8. 复制到 staging 目录（不触碰现有 dsh/ 缓存）
+    // 7. 复制到 staging 目录（不触碰现有 dsh/ 缓存）
     report('正在准备新版本缓存...')
     copyDir(installedDshDir, stagingDir)
 

@@ -6,8 +6,9 @@
 
 ## 🐛 问题修复
 
-- **修复 DSH 运行包更新因 npm 本地陈旧缓存必然失败的问题**：更新时 `npm install` 报 `ETARGET（No matching version found）` 退出码 1，且重试无法自愈。根因是更新流程传了 `--prefer-offline`，npm 对已过期的包元数据缓存不做重验证直接复用，导致解析不到上游新发布的版本。现已移除该参数，恢复 npm 默认元数据重验证策略（tarball 仍走内容寻址缓存、旧依赖复用增量安装，更新速度基本不受影响）。
+- **修复 DSH 运行包更新因 npm 本地陈旧缓存必然失败的问题**：更新时 `npm install` 报 `ETARGET（No matching version found）` 退出码 1，且重试无法自愈。根因是更新流程传了 `--prefer-offline`，npm 对已过期的包元数据缓存不做重验证直接复用，导致解析不到上游新发布的版本。现已移除该参数，恢复 npm 默认元数据重验证策略（tarball 仍走内容寻址缓存，更新速度基本不受影响）。
 - **npm 依赖解析失败提示更友好**：出现 `ETARGET/notarget` 时提示「依赖的目标版本在 registry 中不存在（上游可能尚未发布或镜像未同步），请稍后重试」。
+- **修复更新后依赖树不完整导致 DSH 无法启动的问题**：旧逻辑复用上次缓存的 node_modules 做增量安装，实测 npm 对复用旧树的增量 diff 会漏装依赖（0.1.2-rc.1 的 sharp 0.35.4 缺失其依赖 `@img/colour`，启动报 ERR_MODULE_NOT_FOUND）。现已改为每次全量安装（tarball 走内容寻址缓存，实测仅 24 秒，速度基本不受影响）。
 
 ## 📦 安装包
 
