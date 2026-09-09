@@ -14,22 +14,22 @@
          运行中切换由页面脚本订阅 theme-changed 更新 */
       :root {
         --bg: #ffffff;
-        --text: #333333;
-        --status: #555555;
-        --hint: #8a8a94;
-        --version: #a0a0aa;
-        --spinner-track: rgba(0, 0, 0, 0.08);
-        --accent: #3498db;
+        --status: #8a8a94;
+        --sk-block: rgba(0, 0, 0, 0.05);
+        --sk-strong: rgba(0, 0, 0, 0.1);
+        --sk-card: rgba(0, 0, 0, 0.04);
+        --sk-border: rgba(0, 0, 0, 0.06);
+        --sk-shine: rgba(0, 0, 0, 0.06);
       }
 
       :root[data-theme='dark'] {
         --bg: #1a1a2e;
-        --text: #e0e0e0;
-        --status: #b0b0b0;
-        --hint: #707080;
-        --version: #505060;
-        --spinner-track: rgba(255, 255, 255, 0.1);
-        --accent: #3498db;
+        --status: #707080;
+        --sk-block: rgba(255, 255, 255, 0.06);
+        --sk-strong: rgba(255, 255, 255, 0.12);
+        --sk-card: rgba(255, 255, 255, 0.05);
+        --sk-border: rgba(255, 255, 255, 0.06);
+        --sk-shine: rgba(255, 255, 255, 0.05);
       }
 
       /* 全局重置 */
@@ -46,64 +46,237 @@
 
       body {
         background: var(--bg);
-        color: var(--text);
         font-family: system-ui, -apple-system, sans-serif;
         display: flex;
-        align-items: center;
-        justify-content: center;
         overflow: hidden;
       }
 
-      .container {
-        text-align: center;
-        padding: 2rem;
+      /* 侧栏骨架：新会话按钮 / 工作区标签 / 会话列表 / 底部设置 的轮廓 */
+      .sk-sidebar {
+        width: 260px;
+        flex: none;
+        border-right: 1px solid var(--sk-border);
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
       }
 
-      /* 旋转加载圈：使用 CSS border + animation 实现 */
-      .spinner {
+      .sk-sidebar .sk-newchat {
+        height: 40px;
+        border-radius: 8px;
+      }
+
+      /* 标签块与上方按钮块视觉间距 24px（容器 gap 12 + margin 12） */
+      .sk-sidebar .sk-label {
         width: 64px;
-        height: 64px;
-        border: 6px solid var(--spinner-track);
-        border-top-color: var(--accent);
-        border-radius: 50%;
-        margin: 0 auto 24px;
-        animation: spin 1s linear infinite;
+        height: 12px;
+        border-radius: 4px;
+        margin-top: 12px;
       }
 
-      @keyframes spin {
+      .sk-sidebar .sk-item {
+        height: 32px;
+        border-radius: 6px;
+      }
+
+      .sk-sidebar .sk-spacer {
+        flex: 1;
+      }
+
+      .sk-sidebar .sk-settings {
+        width: 60%;
+        height: 28px;
+        border-radius: 6px;
+      }
+
+      /* 主区骨架：hero 行 / 选择器行 / 输入卡片，整体垂直居中；
+         选择器行与 hero 行视觉间距 28px（容器 gap 16 + margin 12） */
+      .sk-main {
+        flex: 1;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        padding: 0 24px;
+      }
+
+      .sk-hero {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .sk-hero .sk-logo {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+      }
+
+      .sk-hero .sk-title {
+        width: 200px;
+        height: 24px;
+        border-radius: 6px;
+      }
+
+      .sk-hero .sk-badge {
+        width: 52px;
+        height: 18px;
+        border-radius: 9px;
+      }
+
+      .sk-selectors {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .sk-selectors .sk-pill-a {
+        width: 150px;
+        height: 20px;
+        border-radius: 6px;
+      }
+
+      .sk-selectors .sk-pill-b {
+        width: 110px;
+        height: 20px;
+        border-radius: 6px;
+      }
+
+      .sk-inputcard {
+        width: min(720px, 86%);
+        height: 116px;
+        border-radius: 12px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+
+      .sk-inputcard .sk-card-line {
+        width: 38%;
+        height: 12px;
+        border-radius: 4px;
+      }
+
+      .sk-inputcard .sk-card-tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .sk-inputcard .sk-tool-circle {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+      }
+
+      .sk-inputcard .sk-tool-bar {
+        width: 120px;
+        height: 12px;
+        border-radius: 4px;
+      }
+
+      .sk-inputcard .sk-tool-spacer {
+        flex: 1;
+      }
+
+      .sk-inputcard .sk-model-bar {
+        width: 180px;
+        height: 12px;
+        border-radius: 4px;
+      }
+
+      .sk-inputcard .sk-send {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+      }
+
+      /* 色块基类：普通 / 强调 / 输入卡片底覆写；全部承载微光动画 */
+      .sk {
+        position: relative;
+        overflow: hidden;
+        background: var(--sk-block);
+      }
+
+      .sk-strong {
+        background: var(--sk-strong);
+      }
+
+      .sk-card {
+        background: var(--sk-card);
+      }
+
+      /* 微光扫过：::after 渐变循环平移 */
+      .sk::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        transform: translateX(-100%);
+        background: linear-gradient(90deg, transparent, var(--sk-shine), transparent);
+        animation: shimmer 1.8s linear infinite;
+      }
+
+      @keyframes shimmer {
         to {
-          transform: rotate(360deg);
+          transform: translateX(100%);
         }
       }
 
+      /* 系统关闭动画效果时降级为静态骨架 */
+      @media (prefers-reduced-motion: reduce) {
+        .sk::after {
+          animation: none;
+        }
+      }
+
+      /* 状态文字：唯一文字信息，主区底部居中，由 onStatus 实时更新 */
       .status {
-        font-size: 1rem;
+        position: absolute;
+        bottom: 20px;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 12px;
         color: var(--status);
-        min-height: 1.5em;
-        line-height: 1.5;
         word-break: break-word;
-      }
-
-      .hint {
-        font-size: 0.85rem;
-        color: var(--hint);
-        margin-top: 24px;
-      }
-
-      .version {
-        font-size: 0.8rem;
-        color: var(--version);
-        margin-top: 16px;
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <div class="spinner" id="spinner"></div>
+    <div class="sk-sidebar">
+      <div class="sk sk-strong sk-newchat"></div>
+      <div class="sk sk-label"></div>
+      <div class="sk sk-item"></div>
+      <div class="sk sk-strong sk-item"></div>
+      <div class="sk sk-item"></div>
+      <div class="sk-spacer"></div>
+      <div class="sk sk-settings"></div>
+    </div>
+    <div class="sk-main">
+      <div class="sk-hero">
+        <div class="sk sk-strong sk-logo"></div>
+        <div class="sk sk-title"></div>
+        <div class="sk sk-badge"></div>
+      </div>
+      <div class="sk-selectors">
+        <div class="sk sk-pill-a"></div>
+        <div class="sk sk-pill-b"></div>
+      </div>
+      <div class="sk sk-card sk-inputcard">
+        <div class="sk sk-card-line"></div>
+        <div class="sk-card-tools">
+          <div class="sk sk-tool-circle"></div>
+          <div class="sk sk-tool-bar"></div>
+          <div class="sk-tool-spacer"></div>
+          <div class="sk sk-model-bar"></div>
+          <div class="sk sk-strong sk-send"></div>
+        </div>
+      </div>
       <div class="status" id="status">正在启动 DSH 服务...</div>
-      <div class="hint">首次启动可能需要 1-3 分钟下载组件</div>
-      <div class="version" id="version">当前版本: 获取中...</div>
-      <div class="version" id="app-version">应用版本: 获取中...</div>
     </div>
     <script>
       // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
@@ -122,32 +295,6 @@
           window.dsh.onStatus(function (status) {
             var el = document.getElementById('status')
             if (el) el.textContent = status
-          })
-        }
-      })()
-
-      // 获取已安装的 DSH 版本号
-      ;(function () {
-        if (window.dsh && typeof window.dsh.getInstalledVersion === 'function') {
-          window.dsh.getInstalledVersion().then(function (version) {
-            var el = document.getElementById('version')
-            if (el) el.textContent = '当前版本: v' + version
-          }).catch(function () {
-            var el = document.getElementById('version')
-            if (el) el.textContent = '当前版本: 未知'
-          })
-        }
-      })()
-
-      // 获取桌面应用自身的版本号
-      ;(function () {
-        if (window.dsh && typeof window.dsh.getAppVersion === 'function') {
-          window.dsh.getAppVersion().then(function (version) {
-            var el = document.getElementById('app-version')
-            if (el) el.textContent = '应用版本: v' + version
-          }).catch(function () {
-            var el = document.getElementById('app-version')
-            if (el) el.textContent = '应用版本: 未知'
           })
         }
       })()
