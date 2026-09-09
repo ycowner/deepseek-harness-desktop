@@ -5,7 +5,7 @@ import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
 import { getNodeBinaryPath, getNodeDir, checkNodeBinary } from './node-binary'
-import { getDshRepairCacheDir } from './dsh-repair'
+import { getDshRepairCacheDir, invalidateRepairCacheDir } from './dsh-repair'
 
 /**
  * DSH 包未预装或已损坏的错误标识
@@ -351,9 +351,11 @@ function parseDshUrl(line: string): { url: string; port: number } | null {
  * 3. 使用内置 node.exe 运行 npx-cli.js 启动 DSH
  * 4. 监听 stdout/stderr，解析出 DSH 服务 URL 与端口后 resolve
  *
+ * @param retryOnAbiMismatch 检测到缓存原生模块 ABI 不匹配时，是否失效缓存并
+ *   一次性重试回退内置版（启动自愈）。递归重试时传 false 防止无限循环。
  * @returns DshProcess 对象
  */
-export function startDsh(): Promise<DshProcess> {
+export function startDsh(retryOnAbiMismatch = true): Promise<DshProcess> {
   return new Promise<DshProcess>(async (resolve, reject) => {
     // 1. 校验内置 Node.js
     if (!checkNodeBinary()) {
@@ -420,6 +422,8 @@ export function startDsh(): Promise<DshProcess> {
     }
 
     console.log(`[DSH] 找到已缓存的 DSH 包，直接运行: ${cachedDshEntry}`)
+    // 记录本次入口是否来自在线修复/更新缓存（ABI 不匹配时用于自愈回退到内置版）
+    const launchedFromRepairCache = cachedDshEntry.startsWith(join(getDshRepairCacheDir(), 'dsh'))
     // 通过 --port 命令行参数显式传递端口（DSH README 文档支持）
     // 之前仅通过 PORT 环境变量传递，但 DSH 实际未读取该变量，仍监听默认 3080
     // DSH web 启动器（@deepseek-ai/dsh-web-app/lib/startup.js）识别的 flag：
@@ -536,9 +540,22 @@ export function startDsh(): Promise<DshProcess> {
           ? stderrLines.join('\n').slice(-500) // 取最后 500 字符避免过长
           : '无 stderr 输出'
 
+        // ABI 不匹配：原生模块（如 fs-ext）被按其它 Node 版本编译，内置 Node 加载失败。
+        // 若入口来自在线修复/更新缓存，则失效该缓存并一次性重试，回退到内置 dsh-bundled，
+        // 实现启动自愈（否则会反复选中坏缓存崩溃循环）。
+        const abiMismatch = /ERR_DLOPEN_FAILED|NODE_MODULE_VERSION|compiled against a different Node/i.test(errorDetails)
+        if (abiMismatch && retryOnAbiMismatch && launchedFromRepairCache) {
+          console.warn('[DSH] 检测到缓存原生模块 ABI 不匹配，失效缓存并回退内置版本重试')
+          invalidateRepairCacheDir()
+          resolved = true // 防止本次 exit 再触发 finishOnce / 重复处理
+          startDsh(false).then(resolve, reject)
+          return
+        }
+
         const startErr = new Error(`DSH 进程在启动期间退出 (code=${code}, signal=${signal})。\n错误详情: ${errorDetails}`)
-        // 模块缺失类错误视为包损坏，让错误页提供"在线修复"入口（修复路径会重新跑 npm install）
-        if (/ERR_MODULE_NOT_FOUND|Cannot find module/.test(errorDetails)) {
+        // 模块缺失或 ABI 不匹配类错误视为包损坏，让错误页提供"在线修复"入口
+        //（修复路径会重新跑 npm install，且已固定按内置 Node ABI 编译原生模块）
+        if (/ERR_MODULE_NOT_FOUND|Cannot find module/.test(errorDetails) || abiMismatch) {
           startErr.name = DSH_PACKAGE_MISSING_ERROR_NAME
         }
         finishOnce(startErr)

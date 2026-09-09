@@ -2,6 +2,32 @@
 
 ---
 
+# Release Notes — DSH Desktop v1.0.9
+
+## 🐛 问题修复
+
+- **修复在线更新后 DSH 启动即崩溃（`ERR_DLOPEN_FAILED`）的问题**：更新到依赖原生模块 `fs-ext` 的 DSH 版本（如 `0.1.3-alpha.x`，经 `@deepseek-ai/dsh-session-persistence-jsonl` 引入）后，`fs-ext` 的 `node-gyp` 编译在安装时命中了系统 PATH 上的 Node（版本可能与内置运行时不同），编出的 `.node` 与内置 Node.js（v22 / ABI 127）不匹配，DSH 子进程启动即退出（code=1）。现已在更新/修复的 `npm install` 环节把内置 Node 目录前置到 PATH，并显式钉住 `node-gyp` 的目标版本与架构（`npm_config_target` / `arch` / 国内镜像 `disturl`），确保原生模块严格按内置 Node 的 ABI 编译。
+
+## ✨ 健壮性增强
+
+- **更新安装后校验原生模块 ABI**：安装完成、写入缓存前，逐个用内置 Node 加载 `build/Release/*.node`，一旦发现 ABI 不匹配立即中止，绝不把「启动即崩」的坏缓存激活上线。
+- **坏缓存启动自愈回退**：若启动时检测到缓存内原生模块 ABI 不匹配，自动将失效缓存改名 aside 并回退到内置 DSH 版本重启，不再反复崩溃循环；下次更新会重新拉取并正确编译。
+
+## 📦 安装包
+
+| 文件                             | 说明                         |
+| ------------------------------ | -------------------------- |
+| `DSH-Desktop-Setup-1.0.9.exe` | Windows x64 安装程序，需以管理员权限运行 |
+
+> 双击安装包即可从旧版本升级（保留任务栏固定图标）。
+> 若你此前已更新到含 `fs-ext` 的 DSH 版本并遇到启动崩溃，升级到 1.0.9 后应用会自动失效坏缓存并回退到可用的内置版本；也可手动删除 `%LOCALAPPDATA%\DSH Desktop\dsh-cache\dsh` 目录立即恢复。
+
+## 🐛 反馈
+
+如在使用中遇到问题，欢迎通过 [Issues](https://github.com/ycowner/deepseek-harness-desktop/issues) 反馈。
+
+---
+
 # Release Notes — DSH Desktop v1.0.8
 
 ## ✨ 新增功能

@@ -1,10 +1,10 @@
 import { net } from 'electron'
-import { existsSync, mkdirSync, rmSync, renameSync, createWriteStream, createReadStream, writeFileSync, readdirSync, copyFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, rmSync, renameSync, createWriteStream, createReadStream, writeFileSync, readdirSync, copyFileSync, unlinkSync, type Dirent } from 'fs'
 import { createHash } from 'crypto'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { spawn, execFileSync } from 'child_process'
-import { getNodeBinaryPath, getNodeDir } from './node-binary'
+import { getNodeBinaryPath, getNodeDir, getBundledNodeVersion } from './node-binary'
 import { fetchLatestVersion, fetchDistIntegrity } from './dsh-version'
 
 /**
@@ -164,6 +164,11 @@ function installDshFromTarball(tgzPath: string, installDir: string, onProgress?:
 /**
  * 在空目录跑 `npm install <tgz>`，使用指定 registry（内部实现）
  *
+ * 关键：spawn env 必须前置内置 node 目录到 PATH，并钉住 npm_config_target/arch。
+ * 否则 npm 跑 fs-ext 等 nan 源码编译型原生模块的 node-gyp 生命周期脚本时，会按
+ * 环境 PATH 上的系统 Node 编译（实测 v24/ABI137），与运行时内置 Node（v22/ABI127）
+ * 不匹配，DSH 启动即 ERR_DLOPEN_FAILED 崩溃。
+ *
  * @param tgzPath DSH 包 tgz 文件路径
  * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
  * @param registry npm registry 根地址
@@ -186,6 +191,9 @@ function installDshFromTarballWithRegistry(
     const npmCacheDir = join(localAppData, 'DSH Desktop', 'npm-cache')
     mkdirSync(npmCacheDir, { recursive: true })
 
+    // 查询内置 Node 版本，用于钉住 node-gyp --target（ABI 对齐运行时内置 Node）
+    const bundledNodeVersion = getBundledNodeVersion()
+
     // --no-save：不修改 installDir 的 package.json（installDir 本就是空的，无需记录依赖）
     // --omit=dev：DSH 的 devDependencies 是构建期工具，运行时不需要
     // --registry：指定 npm registry（国内镜像或国外源）
@@ -204,8 +212,18 @@ function installDshFromTarballWithRegistry(
         windowsHide: true,
         env: {
           ...process.env,
+          // 前置内置 node 目录到 PATH：npm 跑 fs-ext 等原生模块的 node-gyp 生命周期
+          // 脚本时，.bin 垫片按 PATH 解析 node；若不前置会命中系统 Node（实测 v24/ABI137），
+          // 编出的 .node 与运行时内置 Node（v22/ABI127）不匹配，DSH 启动即 ERR_DLOPEN_FAILED。
+          // 与 dsh-manager.startDsh / preinstall-dsh.js 的 PATH 前置保持一致。
+          PATH: `${getNodeDir()};${process.env.PATH ?? ''}`,
           npm_config_cache: npmCacheDir,
-          npm_config_prefix: npmCacheDir
+          npm_config_prefix: npmCacheDir,
+          // 双保险：显式钉住 node-gyp 目标 Node 版本与架构，即使 PATH 解析异常也按内置 ABI 编译
+          ...(bundledNodeVersion ? { npm_config_target: bundledNodeVersion } : {}),
+          npm_config_arch: 'x64',
+          // node-gyp 编译需下载对应版本头文件，走国内镜像避免 nodejs.org 在境内不稳定
+          npm_config_disturl: 'https://npmmirror.com/mirrors/node'
         }
       }
     )
@@ -295,13 +313,85 @@ function copyDir(src: string, dest: string): void {
 }
 
 /**
- * 清扫缓存目录中残留的 staging / tmp 目录（上次更新或修复中断的产物）
+ * 校验本地源码编译的原生模块能被内置 Node 加载（防 ABI 不匹配）
+ *
+ * 扫描 installDir/node_modules 下所有 build/Release/*.node（node-gyp 源码编译的
+ * 约定产物路径；N-API 预编译模块走 prebuilds/ 或平台子包，不在此列），逐个用内置
+ * node.exe require 加载。若某 .node 是按其它 Node ABI 编译的（如系统 Node），加载
+ * 会报 NODE_MODULE_VERSION 不匹配 / ERR_DLOPEN_FAILED——此时让 prepare 失败，绝不
+ * 把启动即崩的坏缓存激活上线（实测踩坑：fs-ext 被编成系统 Node v24/ABI137）。
+ *
+ * @param installDir npm install 的根目录（其 node_modules 含全部依赖）
+ */
+function assertNativeModulesLoadable(installDir: string): void {
+  const nodeModulesDir = join(installDir, 'node_modules')
+  if (!existsSync(nodeModulesDir)) return
+
+  const compiledBinaries: string[] = []
+  // 收集某个包目录下 build/Release/*.node
+  const collectFromBuildRelease = (pkgDir: string): void => {
+    const releaseDir = join(pkgDir, 'build', 'Release')
+    if (!existsSync(releaseDir)) return
+    try {
+      for (const f of readdirSync(releaseDir)) {
+        if (f.endsWith('.node')) compiledBinaries.push(join(releaseDir, f))
+      }
+    } catch { /* 忽略单个目录读取失败 */ }
+  }
+  // 遍历 node_modules：@scope 目录下探，具体包目录查 build/Release 及其嵌套 node_modules
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 5) return // 防御性深度上限
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const full = join(dir, entry.name)
+      if (entry.name.startsWith('@')) {
+        walk(full, depth + 1)
+      } else {
+        collectFromBuildRelease(full)
+        const nested = join(full, 'node_modules')
+        if (existsSync(nested)) walk(nested, depth + 1)
+      }
+    }
+  }
+  walk(nodeModulesDir, 0)
+
+  for (const bin of compiledBinaries) {
+    try {
+      execFileSync(getNodeBinaryPath(), ['-e', 'require(process.argv[1])', bin], {
+        stdio: 'pipe',
+        encoding: 'utf8',
+        timeout: 30_000
+      })
+    } catch (err) {
+      const e = err as { stderr?: string; message?: string }
+      const msg = String(e.stderr || e.message || '')
+      if (/NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|compiled against a different Node/i.test(msg)) {
+        throw new Error(
+          `原生模块 ABI 不匹配，无法在内置 Node 下加载: ${bin}\n${msg.slice(0, 500)}\n` +
+          `通常是编译时命中了系统 Node 而非内置 Node，请重试更新。`
+        )
+      }
+      // 非 ABI 类加载错误（如缺运行时依赖）不在此拦截，交给启动流程暴露真实原因
+      console.warn(`[DSH Repair] 原生模块加载校验跳过（非 ABI 错误）: ${bin}: ${msg.slice(0, 200)}`)
+    }
+  }
+}
+
+/**
+ * 清扫缓存目录中残留的 staging / tmp / abi-broken 目录（上次更新、修复中断
+ * 或启动自愈失效坏缓存的产物）
  */
 function cleanupStaleStagingDirs(): void {
   const cacheDir = getDshRepairCacheDir()
   try {
     for (const entry of readdirSync(cacheDir, { withFileTypes: true })) {
-      if (entry.isDirectory() && (entry.name.startsWith('dsh.staging.') || entry.name === 'dsh.tmp')) {
+      if (entry.isDirectory() && (entry.name.startsWith('dsh.staging.') || entry.name === 'dsh.tmp' || entry.name.startsWith('dsh.abi-broken.'))) {
         try {
           rmSync(join(cacheDir, entry.name), { recursive: true, force: true })
           console.log(`[DSH Repair] 清理残留目录: ${entry.name}`)
@@ -420,6 +510,10 @@ export async function prepareDshPackage(
     }
     report('DSH 包安装完成')
 
+    // 6.5 校验本地源码编译的原生模块能被内置 Node 加载（防 ABI 不匹配激活坏缓存）
+    report('正在校验原生模块 ABI 兼容性...')
+    assertNativeModulesLoadable(installDir)
+
     // 7. 复制到 staging 目录（不触碰现有 dsh/ 缓存）
     report('正在准备新版本缓存...')
     copyDir(installedDshDir, stagingDir)
@@ -482,6 +576,32 @@ export function activateDshPackage(stagingDir: string): string {
   renameSync(stagingDir, targetDir)
   console.log(`[DSH Repair] DSH 包已激活到: ${targetDir}`)
   return targetDir
+}
+
+/**
+ * 使当前修复缓存失效：把 dsh-cache/dsh 重命名为 dsh-cache/dsh.abi-broken.<ts>
+ *
+ * 供 dsh-manager 启动自愈使用：检测到缓存内原生模块 ABI 不匹配（ERR_DLOPEN_FAILED）
+ * 时调用，重命名后 findCachedDshEntry 会跳过该缓存、回退到内置 dsh-bundled 版本。
+ * 调用时 DSH 子进程已退出，.node 不再被锁定，rename 通常成功；失败返回 false，
+ * 由调用方走 DSH_PACKAGE_MISSING 错误页兜底。残留目录由下次 prepare 前的
+ * cleanupStaleStagingDirs 清扫。
+ *
+ * @returns 成功重命名返回 true，否则 false
+ */
+export function invalidateRepairCacheDir(): boolean {
+  const cacheDir = getDshRepairCacheDir()
+  const targetDir = join(cacheDir, 'dsh')
+  if (!existsSync(targetDir)) return false
+  const brokenDir = join(cacheDir, `dsh.abi-broken.${Date.now()}`)
+  try {
+    renameSync(targetDir, brokenDir)
+    console.warn(`[DSH Repair] 已将 ABI 不匹配的缓存失效: ${targetDir} -> ${brokenDir}`)
+    return true
+  } catch (err) {
+    console.warn(`[DSH Repair] 失效缓存重命名失败: ${(err as Error).message}`)
+    return false
+  }
 }
 
 /**

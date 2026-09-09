@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { execFileSync } from 'child_process'
 
 /**
  * 获取 Node.js 二进制所在的目录路径
@@ -54,4 +55,29 @@ export function getNpmPath(): string {
  */
 export function checkNodeBinary(): boolean {
   return existsSync(getNodeBinaryPath())
+}
+
+// 内置 Node 版本模块级缓存（避免重复 spawn 查询）
+let cachedBundledNodeVersion = ''
+
+/**
+ * 获取内置 Node.js 的版本号（如 "22.19.0"）
+ *
+ * 用于 dsh-repair 在线更新时钉住 node-gyp 的 --target，确保 fs-ext 等
+ * nan 源码编译型原生模块按内置 Node 的 ABI 编译，而非环境 PATH 上的系统 Node
+ * （实测踩坑：系统 Node v24/ABI137 编出的 .node 在内置 Node v22/ABI127 下
+ * 加载报 ERR_DLOPEN_FAILED，DSH 启动即崩）。
+ *
+ * @returns 内置 Node 版本号；查询失败返回空串（调用方据此跳过 target 设置）
+ */
+export function getBundledNodeVersion(): string {
+  if (cachedBundledNodeVersion) return cachedBundledNodeVersion
+  try {
+    cachedBundledNodeVersion = execFileSync(getNodeBinaryPath(), ['-p', 'process.versions.node'], {
+      encoding: 'utf8'
+    }).trim()
+  } catch {
+    cachedBundledNodeVersion = ''
+  }
+  return cachedBundledNodeVersion
 }
