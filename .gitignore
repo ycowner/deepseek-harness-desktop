@@ -46,3 +46,6 @@ Thumbs.db
 .trae/*.png
 .qoder-screenshots/
 /_*.png
+
+# superpowers brainstorm 视觉伴侣产物（mockup 会话目录，不入库）
+.superpowers/
