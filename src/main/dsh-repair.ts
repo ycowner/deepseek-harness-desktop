@@ -164,10 +164,12 @@ function installDshFromTarball(tgzPath: string, installDir: string, onProgress?:
 /**
  * 在空目录跑 `npm install <tgz>`，使用指定 registry（内部实现）
  *
- * 关键：spawn env 必须前置内置 node 目录到 PATH，并钉住 npm_config_target/arch。
- * 否则 npm 跑 fs-ext 等 nan 源码编译型原生模块的 node-gyp 生命周期脚本时，会按
- * 环境 PATH 上的系统 Node 编译（实测 v24/ABI137），与运行时内置 Node（v22/ABI127）
- * 不匹配，DSH 启动即 ERR_DLOPEN_FAILED 崩溃。
+ * 关键：spawn 用的必须是内置 node.exe，且 env 里把内置 node 目录前置到 PATH——
+ * node-gyp 按「运行它的那个 Node」编译（实测 node-gyp 12 直接忽略 --target），
+ * 所以 PATH 前置是 ABI 对齐的唯一机制。缺了它，npm 跑 fs-ext 等 nan 源码编译型
+ * 模块的生命周期脚本时会命中环境 PATH 上的系统 Node，编出的 .node 与运行时内置
+ * Node 的 ABI 不一致，DSH 启动即 ERR_DLOPEN_FAILED 崩溃（历史实例：系统 Node
+ * v24/ABI137 编译 vs 当时的内置 Node v22/ABI127 运行）。
  *
  * @param tgzPath DSH 包 tgz 文件路径
  * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
@@ -191,7 +193,9 @@ function installDshFromTarballWithRegistry(
     const npmCacheDir = join(localAppData, 'DSH Desktop', 'npm-cache')
     mkdirSync(npmCacheDir, { recursive: true })
 
-    // 查询内置 Node 版本，用于钉住 node-gyp --target（ABI 对齐运行时内置 Node）
+    // 查询内置 Node 版本：作为 npm_config_target 传给 node-gyp。实测 node-gyp 12
+    // 已忽略 --target（编译目标恒等于运行它的 Node），故此值主要用作诊断；
+    // 真正的 ABI 对齐靠上面的 node.exe + 下面的 PATH 前置。
     const bundledNodeVersion = getBundledNodeVersion()
 
     // --no-save：不修改 installDir 的 package.json（installDir 本就是空的，无需记录依赖）
@@ -213,16 +217,17 @@ function installDshFromTarballWithRegistry(
         env: {
           ...process.env,
           // 前置内置 node 目录到 PATH：npm 跑 fs-ext 等原生模块的 node-gyp 生命周期
-          // 脚本时，.bin 垫片按 PATH 解析 node；若不前置会命中系统 Node（实测 v24/ABI137），
-          // 编出的 .node 与运行时内置 Node（v22/ABI127）不匹配，DSH 启动即 ERR_DLOPEN_FAILED。
+          // 脚本时，.bin 垫片按 PATH 解析 node；若不前置会命中系统 Node，编出的 .node
+          // 与运行时内置 Node 的 ABI 不一致，DSH 启动即 ERR_DLOPEN_FAILED。
           // 与 dsh-manager.startDsh / preinstall-dsh.js 的 PATH 前置保持一致。
           PATH: `${getNodeDir()};${process.env.PATH ?? ''}`,
           npm_config_cache: npmCacheDir,
           npm_config_prefix: npmCacheDir,
-          // 双保险：显式钉住 node-gyp 目标 Node 版本与架构，即使 PATH 解析异常也按内置 ABI 编译
+          // 辅助信号：显式传内置 Node 版本与架构（保留向后兼容旧版 node-gyp；
+          // node-gyp 12+ 已忽略 --target，不要依赖它做 ABI 对齐）
           ...(bundledNodeVersion ? { npm_config_target: bundledNodeVersion } : {}),
           npm_config_arch: 'x64',
-          // node-gyp 编译需下载对应版本头文件，走国内镜像避免 nodejs.org 在境内不稳定
+          // 旧版 node-gyp 编译需下载对应版本头文件，走国内镜像避免 nodejs.org 在境内不稳定
           npm_config_disturl: 'https://npmmirror.com/mirrors/node'
         }
       }
@@ -319,7 +324,8 @@ function copyDir(src: string, dest: string): void {
  * 约定产物路径；N-API 预编译模块走 prebuilds/ 或平台子包，不在此列），逐个用内置
  * node.exe require 加载。若某 .node 是按其它 Node ABI 编译的（如系统 Node），加载
  * 会报 NODE_MODULE_VERSION 不匹配 / ERR_DLOPEN_FAILED——此时让 prepare 失败，绝不
- * 把启动即崩的坏缓存激活上线（实测踩坑：fs-ext 被编成系统 Node v24/ABI137）。
+ * 把启动即崩的坏缓存激活上线（实测踩坑：fs-ext 被编成系统 Node v24/ABI137，
+ * 而当时内置 Node 是 v22/ABI127）。
  *
  * @param installDir npm install 的根目录（其 node_modules 含全部依赖）
  */

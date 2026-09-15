@@ -3,10 +3,11 @@
  * 下载内置 Node.js 二进制脚本
  *
  * 功能：
- * 1. 下载 Node.js v22.19.0 (Windows x64) 二进制压缩包
- * 2. 解压并将整个目录内容（node.exe + node_modules 等）复制到 resources/node/
- * 3. 如果 resources/node/node.exe 已存在则跳过下载（除非传入 --force）
- * 4. 提供下载进度提示
+ * 1. 下载 Node.js v24.21.0 (Windows x64) 二进制压缩包
+ * 2. 校验压缩包 SHA256（与官方 SHASUMS256.txt 钉值比对），不匹配则中止且不动旧二进制
+ * 3. 解压并将整个目录内容（node.exe + node_modules 等）复制到 resources/node/
+ * 4. 如果 resources/node/node.exe 已存在则跳过下载（除非传入 --force）
+ * 5. 提供下载进度提示
  *
  * 使用方式：
  *   node scripts/download-node.js          # 如不存在则下载
@@ -16,13 +17,19 @@
 const fs = require('fs')
 const path = require('path')
 const https = require('https')
+const crypto = require('crypto')
 const { execSync, execFileSync } = require('child_process')
 
 // Node.js 版本和下载源配置
-const NODE_VERSION = '22.19.0'
+const NODE_VERSION = '24.21.0'
 const NODE_PLATFORM = 'win'
 const NODE_ARCH = 'x64'
 const NODE_DIR_NAME = `node-v${NODE_VERSION}-${NODE_PLATFORM}-${NODE_ARCH}`
+
+// node-v24.21.0-win-x64.zip 的官方 SHA256
+// 来源：https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+// 升级 NODE_VERSION 时必须同步更新此值（以及平台/架构对应的产物），否则下载会被判定为损坏
+const NODE_ZIP_SHA256 = '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541'
 
 // 下载源：国内镜像优先，官方源备用
 const MIRROR_URLS = [
@@ -210,6 +217,32 @@ function cleanupTempFiles() {
 }
 
 /**
+ * 流式计算文件 SHA256 并与期望值比对（不区分大小写）
+ * 失败时抛错，由调用方清理残留并退出；校验在解压之前完成，
+ * 因此不会破坏 resources/node/ 下已可用的二进制。
+ * @param {string} filePath 待校验文件
+ * @param {string} expectedHex 期望的十六进制 SHA256
+ * @returns {Promise<void>}
+ */
+function verifySha256(filePath, expectedHex) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const stream = fs.createReadStream(filePath)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('error', (err) => reject(new Error(`读取文件失败，无法校验 SHA256: ${err.message}`)))
+    stream.on('end', () => {
+      const actual = hash.digest('hex')
+      if (actual.toLowerCase() !== String(expectedHex).toLowerCase()) {
+        reject(new Error(`SHA256 校验失败，压缩包可能损坏或被篡改\n  期望: ${expectedHex}\n  实际: ${actual}`))
+        return
+      }
+      console.log(`[校验] SHA256 通过: ${actual}`)
+      resolve()
+    })
+  })
+}
+
+/**
  * 主流程
  */
 async function main() {
@@ -228,10 +261,8 @@ async function main() {
     return
   }
 
-  if (forceDownload && fs.existsSync(TARGET_NODE_DIR)) {
-    console.log(`[清理] 删除旧的 ${TARGET_NODE_DIR} ...`)
-    fs.rmSync(TARGET_NODE_DIR, { recursive: true, force: true })
-  }
+  // 注：旧 resources/node/ 的清理不在这里，已下移到 SHA256 校验通过之后——
+  // 否则下载或校验失败会把开发环境唯一可用的内置 Node 删空。
 
   // 确保 resources 目录存在
   fs.mkdirSync(RESOURCES_DIR, { recursive: true })
@@ -247,6 +278,22 @@ async function main() {
     console.error('[错误] 请检查网络连接，或手动从以下地址下载并解压到 resources/node/ 目录:')
     console.error(`  ${MIRROR_URLS[0]}`)
     process.exit(1)
+  }
+
+  // 校验压缩包完整性：未通过则删除临时包并中止，旧二进制保持原样
+  try {
+    await verifySha256(TEMP_ZIP_PATH, NODE_ZIP_SHA256)
+  } catch (err) {
+    console.error(`[错误] ${err.message}`)
+    cleanupTempFiles()
+    console.error('[提示] 若刚升级过 NODE_VERSION，请同步更新脚本顶部的 NODE_ZIP_SHA256')
+    process.exit(1)
+  }
+
+  // 校验通过后才删除旧的内置 Node 目录（此时新压缩包已确认可用）
+  if (forceDownload && fs.existsSync(TARGET_NODE_DIR)) {
+    console.log(`[清理] 删除旧的 ${TARGET_NODE_DIR} ...`)
+    fs.rmSync(TARGET_NODE_DIR, { recursive: true, force: true })
   }
 
   // 解压
@@ -284,13 +331,20 @@ async function main() {
     process.exit(1)
   }
 
-  // 输出 node 版本号进行验证
+  // 输出并校验 node 版本号：落地版本必须与 NODE_VERSION 一致，
+  // 否则说明 --force 未生效或目录里残留了旧版本二进制（不能静默接受）
+  let actualVersion = ''
   try {
-    const version = execSync(`"${TARGET_NODE_EXE}" -v`, { encoding: 'utf-8' }).trim()
-    console.log(`[验证] Node.js 版本: ${version}`)
+    actualVersion = execSync(`"${TARGET_NODE_EXE}" -v`, { encoding: 'utf-8' }).trim()
   } catch (err) {
-    console.warn(`[警告] 无法执行 ${TARGET_NODE_EXE} -v: ${err.message}`)
+    console.error(`[错误] 无法执行 ${TARGET_NODE_EXE} -v: ${err.message}`)
+    process.exit(1)
   }
+  if (actualVersion !== `v${NODE_VERSION}`) {
+    console.error(`[错误] 版本校验失败: 期望 v${NODE_VERSION}，实际 ${actualVersion}`)
+    process.exit(1)
+  }
+  console.log(`[验证] Node.js 版本: ${actualVersion}`)
 
   console.log('================================================')
   console.log('  下载完成！文件已就位于 resources/node/')
