@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
-[![Node](https://img.shields.io/badge/Node.js-22.19.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node.js-24.21.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#system-requirements)
 [![DSH](https://img.shields.io/badge/DSH-@deepseek--ai/dsh-blue)](https://github.com/deepseek-ai/deepseek-harness)
 
@@ -20,7 +20,7 @@
 
 ### Goals
 
-- **Zero-dependency, works out of the box**: bundles Node.js v22.19.0 and a pre-installed `@deepseek-ai/dsh`, so the app runs **fully offline** after installation.
+- **Zero-dependency, works out of the box**: bundles Node.js v24.21.0 and a pre-installed `@deepseek-ai/dsh`, so the app runs **fully offline** after installation.
 - **Self-healing install**: if the bundled DSH package is corrupted or missing, the error page exposes a one-click **"Online Repair"** that re-downloads it from the npm registry.
 - **Process lifecycle management**: spawns the DSH child process, performs health checks, handles port conflicts, and tears down the whole process tree on exit.
 - **Better desktop UX**: custom `loading.html` / `error.html` pages, real-time IPC status push, external links opened in the system browser.
@@ -44,7 +44,7 @@
 
 | Area | Details |
 | --- | --- |
-| **Runtime isolation** | Bundles Node.js v22.19.0 (win-x64). No dependency on the system's global Node — avoids version and `PATH` conflicts. |
+| **Runtime isolation** | Bundles Node.js v24.21.0 (win-x64). No dependency on the system's global Node — avoids version and `PATH` conflicts. |
 | **First-launch offline** | Pre-bundles the DSH package into `resources/dsh-bundled/`, so **no network download is required** on first launch. |
 | **Process management** | Parses the DSH service URL from stdout/stderr via regex, polls a health check every 500 ms, and fails fast on a 60 s timeout. |
 | **Port handling** | Defaults to 3080. If taken, first checks whether an existing DSH is already running (reuse), otherwise increments to the next free port (up to 20 retries). |
@@ -105,7 +105,7 @@ cd deepseek-harness-desktop
 npm install
 ```
 
-The `postinstall` hook automatically calls `scripts/download-node.js` to download Node.js v22.19.0 (~30 MB) into `resources/node/`. The script prefers the China mirror and falls back to `nodejs.org`. To force a re-download:
+The `postinstall` hook automatically calls `scripts/download-node.js` to download Node.js v24.21.0 (~36 MB) into `resources/node/`. The script prefers the China mirror and falls back to `nodejs.org`. To force a re-download:
 
 ```powershell
 npm run download-node -- --force
@@ -150,7 +150,7 @@ deepseek-harness-desktop/
 │     ├─ error.html      # Error page (details + Retry / Online Repair)
 │     └─ renderer.ts
 ├─ resources/            # Runtime resources (gitignored)
-│  ├─ node/              # Bundled Node.js v22.19.0 (downloaded at build time)
+│  ├─ node/              # Bundled Node.js v24.21.0 (downloaded at build time)
 │  └─ dsh-bundled/       # Pre-installed DSH package (downloaded at build time)
 ├─ build/                # electron-builder resources
 │  ├─ icon.ico

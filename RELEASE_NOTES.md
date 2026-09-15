@@ -2,6 +2,42 @@
 
 ---
 
+# Release Notes — DSH Desktop v1.0.11
+
+## 🔧 运行时升级
+
+- **内置 Node.js 由 v22.19.0 升级到 v24.21.0（LTS「Krypton」最新补丁版，win-x64）**：DSH 服务子进程、内置 npm/npx、在线修复与运行包更新全部随之切换到新运行时。原生模块 ABI 由 127 变为 137，内置 npm 由 10.9.3 升级到 11.19.0（node-gyp 12.4.0）。
+- **在线更新 / 修复的原生模块编译自动对齐新 ABI**：更新/修复的 `npm install` 由内置 Node 执行，并把内置 Node 目录前置到 PATH，node-gyp 按运行它的 Node 版本（现为 v24.21.0 / ABI 137）编译，原生模块天然对齐新运行时。已用客户端内真实的「更新 DSH」流程实测（v0.1.5-rc.1 → v0.1.5-rc.2：下载 / 完整性校验 / 安装 518 包 / ABI 校验 / 激活 / 重启全部通过），并对 nan 源码编译型模块（fs-ext）单独做过「按 v24 编译 + 在内置 Node 下加载」探针。
+- **出厂 DSH 包已在新运行时下重建**：`resources/dsh-bundled/` 由 `preinstall-dsh` 在 v24 下重新生成，避免首启时因 ABI 不一致报 `ERR_DLOPEN_FAILED`。
+- **下载脚本增加完整性与版本双重校验**：`scripts/download-node.js` 现在先比对压缩包 SHA256（与官方 SHASUMS256.txt 钉值），通过后才解压，并在落地后比对 `node -v` 与脚本内 `NODE_VERSION`，任一不一致直接失败退出；旧 `resources/node/` 的清理已改到校验通过之后，校验失败不会破坏现有可用的内置 Node。
+- **关于模态框可查看运行时**：「帮助 → 关于 DSH Desktop」新增一行「内置 Node 运行时：vX.Y.Z（ABI NNN）」，由内置 node.exe 动态查询，便于反馈问题时确认实际生效的运行时与 ABI。
+
+## ⚠️ 升级须知
+
+- 直接从旧版本双击安装包升级即可。若你此前通过「在线更新 / 修复」拿到过按旧内置 Node（ABI 127）编译的 DSH 缓存，升级后应用会在启动时自动失效该缓存并回退到内置版本，随后的更新会按新 ABI 重新编译；也可手动删除 `%LOCALAPPDATA%\DSH Desktop\dsh-cache\dsh` 立即清理。
+- Node.js 24 要求 Windows 10 及以上，与本客户端既有系统要求一致，无新增限制。安装包体积因运行时更新略有增加（约 +8 MB）。
+
+## 📦 安装包
+
+| 文件                              | 说明                         |
+| ------------------------------- | -------------------------- |
+| `DSH-Desktop-Setup-1.0.11.exe` | Windows x64 安装程序，需以管理员权限运行 |
+
+**安装包校验值**（152,256,433 字节）：
+
+| 算法 | 值 |
+| --- | --- |
+| SHA256 | `034ebcdcaf62b7daaa76c1aee5b17b9f44996625f6349d85286a2fdce063a08b` |
+| SHA512 (base64) | `6T9K6y0No5p/EcGjEJBBWGD/hxDeIqsXqiuGQMehdzSbgTOSxk1eQJegixwqGfSIS4oovVBdYzOyutJRJXKolA==` |
+
+> 双击安装包即可从旧版本升级（保留任务栏固定图标）。
+
+## 🐛 反馈
+
+如在使用中遇到问题，欢迎通过 [Issues](https://github.com/ycowner/deepseek-harness-desktop/issues) 反馈。
+
+---
+
 # Release Notes — DSH Desktop v1.0.10
 
 ## ✨ 体验优化

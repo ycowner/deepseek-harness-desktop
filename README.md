@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
-[![Node](https://img.shields.io/badge/Node.js-22.19.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node.js-24.21.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6?logo=windows&logoColor=white)](#系统要求)
 [![DSH](https://img.shields.io/badge/DSH-@deepseek--ai/dsh-blue)](https://github.com/deepseek-ai/deepseek-harness)
 
@@ -20,7 +20,7 @@
 
 ### 核心目标
 
-- **零依赖开箱即用**：内置 Node.js v22.19.0 与预安装的 `@deepseek-ai/dsh` 包，**完全离线**也能跑。
+- **零依赖开箱即用**：内置 Node.js v24.21.0 与预安装的 `@deepseek-ai/dsh` 包，**完全离线**也能跑。
 - **包体验问题兜底**：DSH 包损坏/缺失时，可在错误页面一键"在线修复"，自动从 npm registry 重新下载。
 - **进程生命周期托管**：自动启动 DSH 子进程、健康检查、端口冲突处理、退出时回收进程树。
 - **桌面 UX 增强**：自定义 loading / error 页面、IPC 状态推送、外部链接跳系统浏览器。
@@ -44,7 +44,7 @@
 
 | 类别 | 说明 |
 | --- | --- |
-| **运行时隔离** | 打包内置 Node.js v22.19.0（win-x64），不依赖系统全局 Node，规避版本/路径冲突 |
+| **运行时隔离** | 打包内置 Node.js v24.21.0（win-x64），不依赖系统全局 Node，规避版本/路径冲突 |
 | **首启离线** | 预打包 DSH 包到 `resources/dsh-bundled/`，首次启动**无需联网下载** |
 | **进程管理** | 启动后通过 stdout/stderr 正则解析出 DSH 服务 URL，500ms 轮询健康检查，60s 超时快速失败 |
 | **端口处理** | 默认 3080，被占用时检测是否已有 DSH 运行（复用）→ 否则自动顺延到下一个可用端口（最多 20 次） |
@@ -105,7 +105,7 @@ cd deepseek-harness-desktop
 npm install
 ```
 
-`postinstall` 钩子会自动调用 `scripts/download-node.js` 下载内置 Node.js v22.19.0（约 30 MB）到 `resources/node/`。国内网络不通时脚本会自动 fallback 到 `nodejs.org` 官方源。如需强制重下：
+`postinstall` 钩子会自动调用 `scripts/download-node.js` 下载内置 Node.js v24.21.0（约 36 MB）到 `resources/node/`。国内网络不通时脚本会自动 fallback 到 `nodejs.org` 官方源。如需强制重下：
 
 ```powershell
 npm run download-node -- --force
@@ -150,7 +150,7 @@ deepseek-harness-desktop/
 │     ├─ error.html      # 错误页（详情 + 重试/在线修复）
 │     └─ renderer.ts
 ├─ resources/            # 运行时资源（gitignore）
-│  ├─ node/              # 内置 Node.js v22.19.0（build 时下载）
+│  ├─ node/              # 内置 Node.js v24.21.0（build 时下载）
 │  └─ dsh-bundled/       # 预安装的 DSH 包（build 时下载）
 ├─ build/                # electron-builder 资源
 │  ├─ icon.ico

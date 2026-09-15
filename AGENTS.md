@@ -32,7 +32,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | 构建    | electron-vite `^2.3.0` + Vite `^5.4.0`                         |
 | 语言    | TypeScript `^5.5.0`（`strict: true`，`target: ES2022`）           |
 | 打包    | electron-builder `^25.0.0`（NSIS 安装包）                           |
-| 内置运行时 | Node.js v22.19.0 LTS（Windows x64，zip 包形式内置到 `resources/node/`） |
+| 内置运行时 | Node.js v24.21.0 LTS（Windows x64，zip 包形式内置到 `resources/node/`） |
 | 子进程   | `child_process.spawn`（DSH 跑在独立子进程，与 Electron 主进程隔离）            |
 
 **架构形态**：经典 Electron 三段式（main / preload / renderer），渲染层是**多页面**（`titlebar.html` + `loading.html` + `error.html`）；窗口为自定义标题栏（WCO，`titleBarStyle: 'hidden'` + `titleBarOverlay`，标题栏页面加载于主 webContents，内容页加载于 `dshView` WebContentsView 子视图）；DSH Web UI 通过 `dshView.webContents.loadURL()` 直接加载远程 127.0.0.1 服务，不经过 Vite bundle。
@@ -199,7 +199,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 **帮助菜单结构**（标题栏「帮助」按钮 → 原生菜单）：
 - 检查更新... → 弹 dialog 选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）。手动检查 DSH 时 `fetchLatestVersion` 并行查 npmmirror 与 npmjs 的 dist-tags 取版本最大者，并附加查询上游 GitHub Releases（`dsh-v*` tag）：若 GitHub 有新版而 npm 未发布，对话框附加「尚未发布到 npm」告知；自动横幅/轮询只认 npm 可安装版本
 - 更新日志 → 子菜单：DSH 运行包日志（上游 `deepseek-ai/deepseek-harness` Releases，tag 前缀 `dsh-v`）/ DSH Desktop 客户端日志（本项目 Releases，tag 前缀 `v`）
-- 关于 DSH Desktop → 模态框（客户端版本号 + DSH 运行包版本号 + GitHub 仓库链接按钮）
+- 关于 DSH Desktop → 模态框（客户端版本号 + DSH 运行包版本号 + 内置 Node 运行时（版本 + ABI，走 `getBundledRuntimeInfo()`，查询失败时整行不渲染）+ GitHub 仓库链接按钮）
 
 更新日志与关于模态框均通过 `dshView.webContents.executeJavaScript` 注入内容区（`[data-dsh-modal]`），单一实例互斥（`window.__dshModalCleanup`），Esc / 遮罩 / × 三种关闭方式；release notes 渲染走 `changelog.ts` 的 `renderMarkdownToHtml`（全文 HTML 转义 + 受限标签白名单，链接仅 `http(s)`）。
 
@@ -228,10 +228,13 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 ### 6.1 内置 Node.js
 
-- 版本：**v22.19.0 Windows x64**（写在 `scripts/download-node.js` 顶部 `NODE_VERSION`）。
-- 下载源：先 `https://npmmirror.com/mirrors/node/...` 国内镜像，失败回退 `https://nodejs.org/dist/...`。
-- 解压用 PowerShell 的 `Expand-Archive`。
+- 版本：**v24.21.0 Windows x64**（写在 `scripts/download-node.js` 顶部 `NODE_VERSION`），ABI `process.versions.modules` = **137**，内置 npm 11.19.0（含 node-gyp 12.4.0）。
+- **压缩包完整性：`NODE_ZIP_SHA256` 钉值校验**。下载后、解压前用流式 SHA256 与钉值比对，不匹配则删临时包并 `exit(1)`；钉值取自官方 `https://nodejs.org/dist/v<版本>/SHASUMS256.txt` 里 `node-v<版本>-win-x64.zip` 那行。**升级 `NODE_VERSION` 时必须同步更新 `NODE_ZIP_SHA256`**，否则 `npm install` / `npm run package` 会直接失败。旧的 `resources/node/` 清理已下移到校验通过之后，校验失败不会破坏现有可用二进制。
+- 下载源：先 `https://npmmirror.com/mirrors/node/...` 国内镜像（302 到 `cdn.npmmirror.com/binaries/node/...`），失败回退 `https://nodejs.org/dist/...`。
+- 解压用 PowerShell 的 `Expand-Archive`。脚本末尾会校验落地 `node -v` 与 `NODE_VERSION` 一致，不一致直接退出（防 `--force` 未生效或残留旧目录）。
 - **打包后**保留 `node.exe` + **完整内置 npm**（`node_modules/npm`，含其 bundle 的全部依赖，体积约 +11MB）。npm 用于 **dsh 在线更新时给下载的包补装运行时依赖**（dsh-repair 的 `installPackageDependencies`）。`extraResources` 仅排除 corepack、`dist-types/**`、`.d.ts`、`.md`、`docs/`、`man/`，详见 `electron-builder.yml`。
+- **升级内置 Node 的 major 属于破坏性变更**：必须按 `download-node --force` → `preinstall-dsh`（重建 `resources/dsh-bundled/` 与 `resources/node/.npm-cache/`，使源码编译型原生模块按新 ABI 产出）→ 完整 `npm run package` 的顺序执行，并留意用户侧 `%LOCALAPPDATA%/DSH Desktop/dsh-cache/` 里按旧 ABI 编译的缓存——该情形由 `dsh-manager.ts` 的启动自愈（失效缓存 aside + 回退 `dsh-bundled`）兜底，见 §12.1 第 25 条。
+- **内置 npm 会随内置 Node 一起跳 major**（v22 → npm 10.9.3，v24 → npm 11.19.0），npm 的大版本行为漂移会直接落到 dsh-repair 的 `npm install <tgz>` 链路上，升级后必须实测确认，见 §12.1 第 26 条。
 
 ### 6.2 DSH 包查找优先级（`dsh-manager.ts` 的 `findCachedDshEntry()`）
 
@@ -490,6 +493,17 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
     - 放大因素：标题栏仅 36px 高，下方内容区是独立 webContents（`dshView`），鼠标移入内容区不会触发标题栏页面的鼠标离开，`:hover` 永远不会自动清除。
     - 类名的三个复位时机：`mouseenter/leave/down/up` 驱动、窗口 `blur`/`focus` 强制清除、主进程 `menu-will-close` 发 `help-menu-closed` 通知清除（覆盖 Esc / 点击外部 / 选中项全部关闭路径）。
     - 新增标题栏交互元素时沿用同一模式，不要引入新的伪类交互态。
+25. **不要只改 `NODE_VERSION` 就发布内置 Node major 升级**。
+    - 原生模块 ABI 随 major 变化（v22 = 127，v24 = 137）。改完常量必须依次跑 `node scripts/download-node.js --force`（会先校验 `NODE_ZIP_SHA256`，通过后连 `resources/node/.npm-cache/` 一起删旧目录）与 `node scripts/preinstall-dsh.js` 重建 `resources/dsh-bundled/`，否则出厂包内按源码编译的 `.node` 仍是旧 ABI，首启即 `ERR_DLOPEN_FAILED`。
+    - N-API / 平台预编译模块（sharp、koffi、node-pty 1.2 的 `prebuilds/`、node-addon-require-builtin 的 `napi-v9`）跨 ABI 可用，`nan` 源码编译型（fs-ext）不可——因此校验器 `assertNativeModulesLoadable` 只扫 `build/Release/*.node` 是有意为之，不要扩到 `prebuilds/`，否则正常的 N-API 模块会被误判。
+    - 老用户 `%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh/` 可能是旧 ABI 编译产物：不要指望用户清缓存，启动路径已有自愈（`dsh-manager.ts` 的 `abiMismatch && retryOnAbiMismatch && launchedFromRepairCache` → `invalidateRepairCacheDir()` + 回退 `dsh-bundled`），拆掉它会把升级变成崩溃循环。
+    - 本机系统 Node 与内置 Node 同 major 时，ABI 错配无法自然复现，验证该链路要靠显式探针（手工放入异 ABI 的 `.node`）而不是靠观察启动成功。
+    - 代码里不要重新写死内置 Node 的版本号：运行时查询走 `getBundledNodeVersion()`（`execFileSync(node.exe, ['-p','process.versions.node'])`），注释描述 ABI 时优先用"内置 Node"而非具体版本。注意：在 npm 11 / node-gyp 12 下该版本号已不再能钉住编译目标（见第 26 条），它现在的价值在于日志与诊断。
+26. **升级内置 Node 后不要假设 npm 行为不变（npm 10 → 11 实测差异）**。
+    - dsh-repair 的 `npm install <tgz>` 跑的是**内置 npm**（`resources/node/node_modules/npm`），它跟内置 Node 同批次升级，npm 的大版本策略变化会静默影响修复/更新产物：
+      a) **install 脚本白名单**：npm 11.19 默认不执行未放行的生命周期脚本，输出 `npm warn install-scripts ... not yet covered by allowScripts`（实测 DSH 0.1.5-rc.1 / rc.2 的 node-pty / koffi / protobufjs / @deepseek-ai/dsh-subprocess-local 全部被延后）。当前依赖集下无功能影响（原生绑定都由 tarball 自带的 prebuild 提供，已用客户端内真实「更新 DSH」流程实测：rc.1 → rc.2 下载 / 完整性校验 / npm install 518 包 / ABI 校验 / 激活 / 重启全部通过），但若上游引入需要 install 脚本产物的模块，修复出的缓存会缺产物。
+      b) **`--target` / `npm_config_target` 不再决定编译目标**：npm 11.19 对 `target` / `arch` / `disturl` 三个环境变量报 `npm warn Unknown env config "..."`；实测 node-gyp 12.4.0 **完全忽略 `--target`**（分别传 `--target=22.19.0` 与 `--target=24.16.0`，生成的 `build/config.gypi` 里 `"target"` 仍是运行 node-gyp 的 `24.21.0`、`node_module_version` 仍为 137，也不会去下载对应版本的头文件），编译目标始终等于**运行它的那个 Node**。结论：`PATH` 前置 `getNodeDir()` 不再是“双保险”，而是**唯一的 ABI 对齐机制，绝对不能删**；`npm_config_target` 继续保留无害，但不要依赖它做对齐，ABI 兜底只靠 `assertNativeModulesLoadable` 与启动自愈。探针附带结论：内置 Node 升到 v24 后，nan 源码编译型模块（实测 fs-ext）能正常按 ABI 137 编译并在内置 Node 下 `require` 成功。
+    - 改动 dsh-repair 安装 env / 参数后，至少跑一次等价复跑验证（空目录 cwd + 同款 env + 拉起临时安装的 DSH），不要只看 `npm run build` 通过。实测踩坑：在仓库根目录误跑该验证会因 `--omit=dev` 把项目 devDependencies 从 `node_modules` 里抽掉（需 `npm install` 恢复）——验证必须在临时空目录里跑。
 
 ### 12.2 改之前要确认
 
