@@ -79,12 +79,6 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 ├── resources/                   ← 运行时资源（被 .gitignore，产物）
 │   ├── node/                    ← 内置 Node.js（由 download-node.js 生成）
 │   └── dsh-bundled/             ← 预装 DSH 包（由 preinstall-dsh.js 生成）
-└── .trae/
-    └── specs/
-        └── wrap-dsh-web-as-desktop-client/   ← 历史需求规格（参考用，不维护）
-            ├── spec.md
-            ├── checklist.md
-            └── tasks.md
 ```
 
 > 根目录有 `dist/`、`dist-electron/`、`dist-exe*/`、`msi/`、`.eb-cache/` 等大量历史构建产物目录，**全部是构建或归档产物，不要当作源码修改**。
@@ -516,17 +510,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 ---
 
-## 13. 相关参考文档
-
-- `.trae/specs/wrap-dsh-web-as-desktop-client/spec.md` — 原始需求规格（Why / What / Impact / 启动流程 / 关键技术决策 / Requirements & Scenarios）
-- `.trae/specs/wrap-dsh-web-as-desktop-client/checklist.md` — 验收清单
-- `.trae/specs/wrap-dsh-web-as-desktop-client/tasks.md` — 任务分解
-
-> 这三个文件是历史规格，**不维护**，新需求请直接更新本 AGENTS.md 或在 issue 中讨论。
-
----
-
-## 14. 修改本文档的时机
+## 13. 修改本文档的时机
 
 请在以下情况发生后**同步更新 AGENTS.md**：
 

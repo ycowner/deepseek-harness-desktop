@@ -40,10 +40,11 @@ Thumbs.db
 .idea/
 .vscode/
 
-# 调试遗留物（临时扫描脚本与验证截图，不入库）
+# IDE/调试遗留物（不入库）
 /*.ps1
 /patch_menu.js
-.trae/*.png
+# Trae IDE 本地工作区残留：历史规格文档与验证截图
+.trae/
 .qoder-screenshots/
 /_*.png
 
