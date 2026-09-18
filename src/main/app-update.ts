@@ -39,6 +39,17 @@ export interface GitHubReleaseInfo {
 }
 
 /**
+ * 客户端更新检查结果（三态判别联合）
+ *
+ * 失败必须与「无新版本」区分：调用方（手动检查对话框）需要把网络失败
+ * 如实报为「检查失败」，而不是误报「已是最新版本」。
+ */
+export type AppUpdateCheckResult =
+  | { status: 'update-available'; latest: GitHubReleaseInfo }
+  | { status: 'up-to-date'; latest: GitHubReleaseInfo }
+  | { status: 'error'; error: string }
+
+/**
  * 获取当前安装的桌面应用版本号
  */
 export function getInstalledAppVersion(): string {
@@ -127,18 +138,23 @@ export async function fetchGitHubLatest(): Promise<GitHubReleaseInfo> {
 /**
  * 检查 GitHub 是否有可用更新
  *
- * 比较本地版本与 GitHub 最新版本号；当前不落后时返回 null；
- * 网络失败时返回 null（仅记录日志，不打断用户操作）。
+ * 比较本地版本与 GitHub 最新版本号，三态返回：
+ * - `update-available` / `up-to-date` 均携带 latest，供对话框直接展示最新版本号；
+ * - `error` 表示请求失败（仅记录日志，不打断用户操作），调用方须如实报错，
+ *   不得与「无新版本」混同。
  */
-export async function checkForGitHubAppUpdate(): Promise<GitHubReleaseInfo | null> {
+export async function checkForGitHubAppUpdate(): Promise<AppUpdateCheckResult> {
   const currentVersion = getInstalledAppVersion()
   let latest: GitHubReleaseInfo
   try {
     latest = await fetchGitHubLatest()
   } catch (err) {
-    console.error(`[DSH] GitHub 客户端版本检查失败: ${(err as Error).message}`)
-    return null
+    const message = (err as Error).message
+    console.error(`[DSH] GitHub 客户端版本检查失败: ${message}`)
+    return { status: 'error', error: message }
   }
-  if (compareVersions(currentVersion, latest.version) >= 0) return null
-  return latest
+  if (compareVersions(currentVersion, latest.version) >= 0) {
+    return { status: 'up-to-date', latest }
+  }
+  return { status: 'update-available', latest }
 }

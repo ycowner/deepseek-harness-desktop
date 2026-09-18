@@ -4,7 +4,7 @@ import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } fr
 import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
 import { getBundledRuntimeInfo } from './node-binary'
 import { checkForUpdate, getInstalledDshVersion, isValidVersion, compareVersions } from './dsh-version'
-import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, fetchGitHubLatest } from './app-update'
+import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers } from './app-update'
 import { fetchDshChangelogs, fetchAppChangelogs, renderMarkdownToHtml, escapeHtml, ChangelogEntry } from './changelog'
 import { getThemeSetting, setThemeSetting, getEffectiveTheme, getOverlayColors, registerThemeHooks, registerNativeThemeListener, applyEmulateMedia } from './theme-manager'
 import type { EffectiveTheme } from './theme-manager'
@@ -314,8 +314,8 @@ async function manualCheckDshUpdate(): Promise<void> {
  * 手动检查 DSH Desktop 客户端更新（仅打包环境允许）
  *
  * 发现更新 → 注入紫色横幅 + 弹 dialog 告知；
- * 已是最新 → 弹 dialog 显示版本（需额外调用 fetchGitHubLatest 获取最新版本号）；
- * 失败 → 弹 dialog 显示错误；
+ * 已是最新 → 弹 dialog 显示版本（最新版本号随检查结果携带，无需额外请求）；
+ * 检查失败 → 弹 dialog 显示错误原因（不得误报为「已是最新版本」）；
  * 开发环境 → 弹 dialog 提示不支持。
  */
 async function manualCheckAppUpdate(): Promise<void> {
@@ -332,35 +332,40 @@ async function manualCheckAppUpdate(): Promise<void> {
     return
   }
   try {
-    const info = await checkForGitHubAppUpdate()
-    if (info) {
-      pendingAppUpdateVersion = info.version
-      pendingAppUpdateReleaseUrl = info.releaseUrl
+    const result = await checkForGitHubAppUpdate()
+    if (result.status === 'error') {
+      await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: '检查失败',
+        message: 'DSH Desktop 客户端版本检查失败',
+        detail: result.error,
+        buttons: ['确定'],
+        defaultId: 0
+      })
+      return
+    }
+    if (result.status === 'update-available') {
+      pendingAppUpdateVersion = result.latest.version
+      pendingAppUpdateReleaseUrl = result.latest.releaseUrl
       await injectAppUpdateBanner()
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: '发现新版本',
         message: 'DSH Desktop 客户端有新版本可用',
-        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${info.version}\n\n顶部紫色横幅已显示，点击横幅中的「前往下载」将打开 GitHub Release 页面。`,
+        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n顶部紫色横幅已显示，点击横幅中的「前往下载」将打开 GitHub Release 页面。`,
         buttons: ['确定'],
         defaultId: 0
       })
-    } else {
-      // 已是最新版本，额外请求一次拿到最新版本号展示
-      let latestVersion = '未知'
-      try {
-        const latest = await fetchGitHubLatest()
-        latestVersion = latest.version
-      } catch { /* 忽略获取失败 */ }
-      await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: '已是最新版本',
-        message: 'DSH Desktop 客户端已是最新版本',
-        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${latestVersion}`,
-        buttons: ['确定'],
-        defaultId: 0
-      })
+      return
     }
+    await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '已是最新版本',
+      message: 'DSH Desktop 客户端已是最新版本',
+      detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}`,
+      buttons: ['确定'],
+      defaultId: 0
+    })
   } catch (err) {
     await dialog.showMessageBox(mainWindow, {
       type: 'warning',
@@ -964,13 +969,15 @@ async function performUpdate(): Promise<void> {
 async function checkForGitHubAppUpdateAndPrompt(): Promise<void> {
   if (!app.isPackaged) return
   try {
-    const info = await checkForGitHubAppUpdate()
-    if (!info) {
+    const result = await checkForGitHubAppUpdate()
+    // 失败仅日志（checkForGitHubAppUpdate 内已打），静默不打断启动
+    if (result.status === 'error') return
+    if (result.status === 'up-to-date') {
       console.log('[DSH] 客户端版本检查：已是最新版本')
       return
     }
-    pendingAppUpdateVersion = info.version
-    pendingAppUpdateReleaseUrl = info.releaseUrl
+    pendingAppUpdateVersion = result.latest.version
+    pendingAppUpdateReleaseUrl = result.latest.releaseUrl
     await injectAppUpdateBanner()
   } catch (err) {
     console.error(`[DSH] 客户端版本检查失败: ${(err as Error).message}`)
