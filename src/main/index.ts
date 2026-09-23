@@ -8,6 +8,7 @@ import { checkForGitHubAppUpdate, getInstalledAppVersion, cleanupLegacyInstaller
 import { fetchDshChangelogs, fetchAppChangelogs, renderMarkdownToHtml, escapeHtml, ChangelogEntry } from './changelog'
 import { getThemeSetting, setThemeSetting, getEffectiveTheme, getOverlayColors, registerThemeHooks, registerNativeThemeListener, applyEmulateMedia } from './theme-manager'
 import type { EffectiveTheme } from './theme-manager'
+import { refreshBalance, startBalancePolling, stopBalancePolling, getBalanceSnapshot, onBalanceUpdate, type BalanceSnapshot } from './deepseek-balance'
 
 // 自定义标题栏高度（与 BrowserWindow 的 titleBarOverlay.height 保持一致）
 const TITLEBAR_HEIGHT = 48
@@ -48,6 +49,9 @@ let pendingDshUpdateVersion: string | null = null
 
 // 最近一次已提示过更新的 DSH 最新版本（用于抑制同一版本的重复弹窗/横幅）
 let lastPromptedDshVersion: string | null = null
+
+// 最近一次由窗口聚焦触发余额刷新的时间（30s 防抖，避免 Alt+Tab 等频繁聚焦触发查询）
+let lastFocusBalanceRefresh = 0
 
 // GitHub 仓库地址（关于模态框 GitHub 按钮点击后在系统默认浏览器打开）
 const GITHUB_REPO_URL = 'https://github.com/ycowner/deepseek-harness-desktop'
@@ -243,6 +247,126 @@ function syncInjectedTheme(): void {
     })()
   `
   dshView.webContents.executeJavaScript(code).catch(() => {
+    /* 页面导航中静默忽略 */
+  })
+}
+
+/**
+ * 余额明细 tooltip 注入样式（注入 DSH 内容页）
+ *
+ * 面板必须注入在 dshView（DSH 页）内而非标题栏页：dshView 子视图绘制在主
+ * webContents **之上**，标题栏页内的面板会被 DSH 内容完全遮挡。早期版本
+ * 用「展开期间隐藏 dshView」规避，导致内容区整片黑屏，已废弃。
+ *
+ * 主题适配走 prefers-color-scheme 媒体查询：DSH UI 本身响应该媒体查询
+ * （applyEmulateMedia 按生效主题模拟），面板随之自动切换，无需额外同步变量。
+ * 水平坐标 left 与 titlebar.html 的 .bb-wrap left 硬编码同源（徽章位置），
+ * 调整徽章位置时两处需同步。选择器统一加 #dsb-tooltip 前缀，
+ * 避免与 DSH 页面自身样式（.k/.v 等通用类名）碰撞。
+ */
+const BALANCE_TOOLTIP_CSS = [
+  '#dsb-tooltip {',
+  '  position: fixed; top: 56px; left: 242px; width: 264px;',
+  '  padding: 14px 16px; border-radius: 10px;',
+  '  border: 1px solid #dcdcdc; background: #ffffff;',
+  '  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);',
+  '  color: #1f1f1f; font-size: 12px; line-height: 1.7;',
+  '  z-index: 2147483646; pointer-events: none;',
+  '  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;',
+  '}',
+  '@media (prefers-color-scheme: dark) {',
+  '  #dsb-tooltip {',
+  '    border-color: #3d3d3d; background: #2a2a2a;',
+  '    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);',
+  '    color: #e6e6e6;',
+  '  }',
+  '}',
+  '#dsb-tooltip .bbt-title { font-size: 11px; color: #6b6b6b; }',
+  '#dsb-tooltip .bbt-amount { font-size: 20px; font-weight: 600; letter-spacing: 0.2px; margin-top: 2px; }',
+  '#dsb-tooltip .bbt-amount.is-warn { color: #d93025; }',
+  '#dsb-tooltip .bbt-grid { display: flex; gap: 18px; margin-top: 8px; }',
+  '#dsb-tooltip .bbt-grid .k { color: #6b6b6b; font-size: 11px; }',
+  '#dsb-tooltip .bbt-msg { margin-top: 8px; color: #6b6b6b; font-size: 11px; }',
+  '#dsb-tooltip .bbt-hint { margin-top: 8px; padding-top: 8px; border-top: 1px solid #dcdcdc; color: #6b6b6b; font-size: 11px; }',
+  '@media (prefers-color-scheme: dark) {',
+  '  #dsb-tooltip .bbt-title { color: #9a9a9a; }',
+  '  #dsb-tooltip .bbt-amount.is-warn { color: #ef4444; }',
+  '  #dsb-tooltip .bbt-grid .k { color: #9a9a9a; }',
+  '  #dsb-tooltip .bbt-msg { color: #9a9a9a; }',
+  '  #dsb-tooltip .bbt-hint { border-top-color: #3d3d3d; color: #9a9a9a; }',
+  '}'
+].join('\n')
+
+/**
+ * 注入余额明细 tooltip 外壳（样式 + 空容器）到 DSH 内容页
+ *
+ * 幂等：已存在则跳过。每次内容视图文档加载完成（did-finish-load）时调用，
+ * 保证刷新/导航后面板随新文档重建、首次悬停零延迟；
+ * loading/error 页（非 DSH 页）经 isDshPageLoaded 守卫自动跳过。
+ */
+function injectBalanceTooltipShell(): void {
+  if (!dshView || dshView.webContents.isDestroyed() || !isDshPageLoaded()) return
+  const code = `
+    (function () {
+      if (document.getElementById('dsb-tooltip')) return 'exists'
+      var style = document.createElement('style')
+      style.id = 'dsb-tooltip-style'
+      style.textContent = ${JSON.stringify(BALANCE_TOOLTIP_CSS)}
+      ;(document.head || document.documentElement).appendChild(style)
+      var panel = document.createElement('div')
+      panel.id = 'dsb-tooltip'
+      panel.hidden = true
+      ;(document.body || document.documentElement).appendChild(panel)
+      return 'injected'
+    })()
+  `
+  void dshView.webContents.executeJavaScript(code).catch(() => {
+    /* 页面导航中静默忽略 */
+  })
+}
+
+/**
+ * 展开余额明细 tooltip
+ *
+ * html 由标题栏页构建（buildTooltip：本地数字与固定文案，无远端文本），
+ * 经 JSON.stringify 安全嵌入注入代码。外壳缺失时一并补建（单次往返），
+ * 覆盖 SPA 路由替换 body 的极端场景。
+ */
+function showBalanceTooltip(html: string): void {
+  if (!dshView || dshView.webContents.isDestroyed() || !isDshPageLoaded()) return
+  const code = `
+    (function () {
+      if (!document.getElementById('dsb-tooltip')) {
+        var style = document.createElement('style')
+        style.id = 'dsb-tooltip-style'
+        style.textContent = ${JSON.stringify(BALANCE_TOOLTIP_CSS)}
+        ;(document.head || document.documentElement).appendChild(style)
+        var shell = document.createElement('div')
+        shell.id = 'dsb-tooltip'
+        ;(document.body || document.documentElement).appendChild(shell)
+      }
+      var panel = document.getElementById('dsb-tooltip')
+      panel.innerHTML = ${JSON.stringify(html)}
+      panel.hidden = false
+      return 'shown'
+    })()
+  `
+  void dshView.webContents.executeJavaScript(code).catch(() => {
+    /* 页面导航中静默忽略 */
+  })
+}
+
+/** 收起余额明细 tooltip（保留内容，下次展开无闪烁） */
+function hideBalanceTooltip(): void {
+  if (!dshView || dshView.webContents.isDestroyed()) return
+  const code = `
+    (function () {
+      var panel = document.getElementById('dsb-tooltip')
+      if (panel) panel.hidden = true
+      return true
+    })()
+  `
+  void dshView.webContents.executeJavaScript(code).catch(() => {
     /* 页面导航中静默忽略 */
   })
 }
@@ -677,6 +801,13 @@ function createWindow(): void {
   // 真正生效靠后续导航完成点（startDshAndLoad / performUpdate）的重设
   applyEmulateMedia(dshView.webContents, getEffectiveTheme())
 
+  // 内容视图每次文档加载完成（首次 + 刷新/导航）后预置余额 tooltip 注入外壳
+  // （样式 + 空容器），保证首次悬停零延迟；非 DSH 页（loading/error）由
+  // isDshPageLoaded 守卫自动跳过
+  dshView.webContents.on('did-finish-load', () => {
+    injectBalanceTooltipShell()
+  })
+
   // 加载标题栏与 loading 界面
   loadTitlebarPage()
   loadLoadingPage()
@@ -686,9 +817,36 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // 兜底显示：若 ready-to-show 在监听挂载前已触发（时序竞争）或事件丢失，
+  // 窗口将永远停在 show:false 状态（现象：应用启动后无窗口，进程与托盘均正常）。
+  // 延迟 3s 检查：仍未显示且未在退出/最小化流程中则强制 show()。
+  // timer unref 避免拖住事件循环；closed 时 mainWindow 置空由闭包守卫防误触
+  const showFallbackTimer = setTimeout(() => {
+    if (
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      !isQuitting &&
+      !mainWindow.isVisible() &&
+      !mainWindow.isMinimized()
+    ) {
+      mainWindow.show()
+      console.warn('[DSH] ready-to-show 未按时触发，已兜底显示窗口')
+    }
+  }, 3000)
+  showFallbackTimer.unref()
+
   // 窗口尺寸变化（resize / 最大化 / 还原）时同步视图布局
   mainWindow.on('resize', () => {
     layoutViews()
+  })
+
+  // 窗口重新聚焦时刷新余额（30s 防抖）：用户切回应用能看到较新余额，
+  // 又避免 Alt+Tab、对话框关闭等频繁聚焦触发查询
+  mainWindow.on('focus', () => {
+    const now = Date.now()
+    if (now - lastFocusBalanceRefresh < 30_000) return
+    lastFocusBalanceRefresh = now
+    void refreshBalance('focus')
   })
 
   // 外部链接在系统默认浏览器中打开（挂在内容视图上）
@@ -788,9 +946,9 @@ async function confirmAndQuit(): Promise<void> {
 /**
  * 创建系统托盘图标（应用启动后常驻，右键弹出原生菜单）
  *
- * 菜单仅含两项：「打开主界面」与「退出」。图标复用 getWindowIconPath()
- * （icon.ico 为多尺寸，Electron 自动选取托盘尺寸）；图标读取失败时
- * 仅记录日志并跳过托盘创建，不影响其他功能。
+ * 菜单含四项：「打开主界面」/ DeepSeek 余额（只读，随查询结果重建）/「刷新余额」/
+ * 「退出」。图标复用 getWindowIconPath()（icon.ico 为多尺寸，Electron 自动选取
+ * 托盘尺寸）；图标读取失败时仅记录日志并跳过托盘创建，不影响其他功能。
  */
 function createTray(): void {
   if (tray) return
@@ -803,10 +961,62 @@ function createTray(): void {
   tray.setToolTip('DSH Desktop')
   console.log('[DSH] 系统托盘图标已创建')
   // Windows 上 setContextMenu 后右键自动弹出，无需监听 right-click
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()))
+  // 订阅余额更新：① 推送到标题栏页面渲染徽章（只含数字，绝不含 API Key）；
+  // ② 重建托盘菜单（原生菜单不支持逐项着色，警示态用 ⚠ 符号 + 文案区分）
+  onBalanceUpdate((snapshot: BalanceSnapshot) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('balance-update', snapshot)
+    }
+    updateTrayMenu()
+  })
+}
+
+/**
+ * 构造托盘菜单模板
+ *
+ * 第二项为 DeepSeek 余额只读项（enabled: false 防误点）：原生菜单无法逐项着色，
+ * 警示态通过 ⚠/● 符号与文案表达（红/橙色仅存在于标题栏徽章，见 titlebar.html）。
+ * 点击「刷新余额」会触发一次查询，结果经 balance-update 推送后由本模板重建。
+ */
+function buildTrayTemplate(): Electron.MenuItemConstructorOptions[] {
+  return [
     { label: '打开主界面', click: () => { showMainWindow() } },
+    { label: buildBalanceMenuLabel(), enabled: false },
+    { label: '刷新余额', click: () => { void refreshBalance('tray') } },
+    { type: 'separator' },
     { label: '退出', click: () => { void confirmAndQuit() } }
-  ]))
+  ]
+}
+
+/** 托盘菜单 / tooltip 用的余额文案（一行，纯文本） */
+function buildBalanceMenuLabel(): string {
+  const snap = getBalanceSnapshot()
+  const amount = snap.cny != null ? `¥${snap.cny.toFixed(2)}` : ''
+  switch (snap.status) {
+    case 'ok':
+      return `DeepSeek 余额：${amount}`
+    case 'low':
+      return `DeepSeek 余额：${amount || '¥0.00'} ⚠ 余额不足`
+    case 'auth':
+      return 'DeepSeek 余额：⚠ API Key 已失效'
+    case 'nocfg':
+      return 'DeepSeek 余额：未配置 API Key'
+    case 'net':
+      return 'DeepSeek 余额：⚠ 查询失败（网络异常）'
+    case 'relay':
+      return 'DeepSeek 余额：—（自定义 API 地址无法查询）'
+    default:
+      return 'DeepSeek 余额：查询中...'
+  }
+}
+
+/** 重建托盘菜单与 tooltip（余额更新回调调用；无托盘时跳过） */
+function updateTrayMenu(): void {
+  if (!tray) return
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()))
+  const label = buildBalanceMenuLabel()
+  tray.setToolTip(`DSH Desktop\n${label}`)
 }
 
 /**
@@ -851,6 +1061,10 @@ async function startDshAndLoad(): Promise<void> {
       checkDshUpdateAndPrompt()
       // 异步检查桌面应用自身更新（不阻塞启动流程；有新版时引导打开 GitHub Release 页面）
       void checkForGitHubAppUpdateAndPrompt()
+      // 启动后首次查询 DeepSeek 余额并开启每 5 分钟轮询（异步不阻塞；
+      // 结果经 balance-update 推送标题栏徽章与托盘菜单，API Key 不出主进程）
+      void refreshBalance('startup')
+      startBalancePolling()
     }
   } catch (err) {
     const error = err as Error
@@ -1214,6 +1428,37 @@ ipcMain.handle('get-app-icon', (event) => {
   }
 })
 
+// ==================== DeepSeek 余额 ====================
+
+// 读取当前余额快照（titlebar.html 徽章初始化时调用，不触发查询）。
+// 快照只含状态与数字，绝不含 API Key；来源不受信任时返回 net 态占位。
+ipcMain.handle('get-balance', (event) => {
+  if (!isTrustedSender(event)) {
+    return { status: 'net', message: '不受信任的调用来源' } as BalanceSnapshot
+  }
+  return getBalanceSnapshot()
+})
+
+// 手动刷新余额（titlebar.html 徽章点击触发；结果经 balance-update 推送回本页）
+ipcMain.on('refresh-balance', (event) => {
+  if (!isTrustedSender(event)) return
+  void refreshBalance('manual')
+})
+
+// 余额明细 tooltip 开合通知（titlebar.html 徽章悬停/离开触发）
+// 面板注入在 DSH 内容页内（见 injectBalanceTooltipShell 注释）：dshView 子视图
+// 绘制在主 webContents 之上，标题栏页内的面板会被 DSH 内容完全遮挡（早期版本
+// 用展开期间 dshView.setVisible(false) 规避，导致内容区黑屏，已废弃）
+ipcMain.on('balance-tooltip', (event, open: boolean, html?: string) => {
+  if (!isTrustedSender(event)) return
+  if (open === true) {
+    if (typeof html !== 'string') return
+    showBalanceTooltip(html)
+  } else {
+    hideBalanceTooltip()
+  }
+})
+
 // 同步获取生效主题：供 preload 在 document_start 时机为页面打 data-theme 标，
 // 实现首屏无闪烁（主/内容视图的每个页面加载都会经过）。仅返回字符串，无阻塞风险。
 ipcMain.on('get-theme-sync', (event) => {
@@ -1387,6 +1632,8 @@ app.on('window-all-closed', async () => {
   } catch (err) {
     console.error(`[DSH] 停止失败: ${(err as Error).message}`)
   }
+  // 停止余额轮询（退出路径，避免定时器拖住进程）
+  stopBalancePolling()
 
   if (process.platform !== 'darwin') {
     app.quit()

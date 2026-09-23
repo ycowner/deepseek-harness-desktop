@@ -39,6 +39,8 @@
       html,
       body {
         height: 100%;
+        /* 标题栏内容均在 48px 内，不向下溢出（余额明细 tooltip 已改为注入
+           DSH 内容页展示，见下方徽章脚本注释，不再需要从此页下探） */
         overflow: hidden;
       }
 
@@ -138,6 +140,134 @@
         outline: 1px solid var(--tb-focus-ring);
         outline-offset: -1px;
       }
+
+      /* ==================== DeepSeek 余额徽章 ==================== */
+      /* 数据由主进程 deepseek-balance.ts 查询后经 IPC 推送（只含数字，绝不含 API Key）。
+         交互态沿用 is-hover / is-active 类名，不使用 :hover / :active 伪类
+         （原因见上方按钮注释：原生菜单期间收不到鼠标事件，伪类会滞留） */
+
+      :root {
+        --bb-warn-strong: #ef4444;
+      }
+
+      :root[data-theme='dark'] {
+        --bb-warn-strong: #ff6b6b;
+      }
+
+      /* 徽章容器：紧贴帮助按钮右侧（帮助按钮 left:186 + 宽48 + 8 间距）。
+         余额明细 tooltip 不在本页渲染（dshView 子视图绘制在主 webContents 之上会遮挡），
+         由主进程注入 DSH 内容页展示，故本容器只负责徽章自身布局 */
+      .bb-wrap {
+        position: absolute;
+        left: 242px;
+        top: 10px;
+        height: 28px;
+      }
+
+      .balance-badge {
+        height: 28px;
+        padding: 0 10px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--tb-text);
+        font-size: 12px;
+        font-family: inherit;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        white-space: nowrap;
+        /* 必须脱离拖拽区域，否则点击事件不会触发 */
+        -webkit-app-region: no-drag;
+      }
+
+      .balance-badge.is-hover {
+        background: var(--tb-btn-hover);
+      }
+
+      .balance-badge.is-active {
+        background: var(--tb-btn-active);
+      }
+
+      .balance-badge:focus:not(:focus-visible) {
+        outline: none;
+      }
+
+      .balance-badge:focus-visible {
+        outline: 1px solid var(--tb-focus-ring);
+        outline-offset: -1px;
+      }
+
+      /* 状态圆点：ok 绿 / low 红（脉冲）/ auth 橙 / 其余灰 / loading 闪烁 */
+      .bb-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #22c55e;
+        flex: none;
+      }
+
+      .balance-badge[data-status='low'] .bb-dot {
+        background: var(--bb-warn-strong);
+        animation: bb-pulse 1.2s ease-in-out infinite;
+      }
+
+      .balance-badge[data-status='auth'] .bb-dot {
+        background: #f59e0b;
+      }
+
+      .balance-badge[data-status='nocfg'] .bb-dot,
+      .balance-badge[data-status='net'] .bb-dot,
+      .balance-badge[data-status='relay'] .bb-dot {
+        background: #8a8a8a;
+      }
+
+      .balance-badge[data-status='loading'] .bb-dot {
+        background: #8a8a8a;
+        animation: bb-blink 1s linear infinite;
+      }
+
+      /* 状态着色：low 红底脉冲（最醒目）/ auth 橙字 / 其余跟随主题中性色 */
+      .balance-badge[data-status='low'] {
+        color: var(--bb-warn-strong);
+        background: rgba(239, 68, 68, 0.14);
+      }
+
+      .balance-badge[data-status='auth'] {
+        color: #f59e0b;
+      }
+
+      :root[data-theme='light'] .balance-badge[data-status='auth'] {
+        color: #b06000;
+      }
+
+      @keyframes bb-pulse {
+        0%,
+        100% {
+          box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+        }
+        50% {
+          box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);
+        }
+      }
+
+      @keyframes bb-blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.25;
+        }
+      }
+
+      /* 窄窗口：省掉 ¥ 符号位，保住金额与 WCO 三键的间距 */
+      @media (max-width: 540px) {
+        .balance-badge .bb-symbol {
+          display: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -145,6 +275,14 @@
     <div class="title">DSH Desktop</div>
     <button class="settings-btn" id="settings-btn" title="设置" aria-label="设置">设置</button>
     <button class="help-btn" id="help-btn" title="帮助" aria-label="帮助">帮助</button>
+    <!-- DeepSeek 余额徽章：位于帮助按钮右侧，悬停出明细 tooltip，点击手动刷新 -->
+    <div class="bb-wrap" id="bb-wrap">
+      <button class="balance-badge" id="balance-badge" type="button" data-status="loading" aria-label="DeepSeek 余额">
+        <span class="bb-dot" aria-hidden="true"></span>
+        <span class="bb-symbol" aria-hidden="true">¥</span>
+        <span class="bb-amt" id="bb-amt">–––</span>
+      </button>
+    </div>
     <script>
       // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
       // （首屏打标由 preload 在 document_start 同步完成，此处仅处理运行中切换）
@@ -264,6 +402,172 @@
             window.dsh.showSettingsMenu({ x: rect.left, y: rect.bottom, width: rect.width })
           }
         })
+      })()
+
+      // ==================== DeepSeek 余额徽章 ====================
+      // 查询在主进程 deepseek-balance.ts 完成（API Key 不出主进程），快照经 IPC
+      // 推送，本段只做渲染与交互。状态与颜色的对应见上方 CSS data-status 选择器。
+      // tooltip 面板由主进程注入 DSH 内容页展示（dshView 子视图绘制在主 webContents
+      // 之上，本页内的面板会被 DSH 内容完全遮挡，早期"展开期间隐藏 dshView"方案
+      // 会导致内容区黑屏已废弃）：本页只负责构建 tooltip 的内容 HTML，
+      // 经 setBalanceTooltip(open, html) 发给主进程注入/关闭
+      ;(function () {
+        var wrap = document.getElementById('bb-wrap')
+        var badge = document.getElementById('balance-badge')
+        var amtEl = document.getElementById('bb-amt')
+        if (!wrap || !badge || !amtEl) return
+        var lastSnap = null
+        var tooltipOpen = false
+
+        // 徽章金额格式化：小于一万显示 39.63（¥ 由独立符号位 .bb-symbol 提供，
+        // 渲染成「¥ 39.63」；窄窗口时符号位隐藏只剩数字），大于等于一万显示 1.23万。
+        // 注意不要在这里加 ¥ 前缀——会与 .bb-symbol 叠加成双 ¥
+        function fmtNum(v) {
+          if (v == null || isNaN(v)) return '–––'
+          if (v >= 10000) return (v / 10000).toFixed(2) + '万'
+          return v.toFixed(2)
+        }
+
+        // tooltip 内金额格式化：面板独立展示，¥ 前缀直接拼在数字前
+        function fmtCNY(v) {
+          if (v == null || isNaN(v)) return '–––'
+          if (v >= 10000) return '¥' + (v / 10000).toFixed(2) + '万'
+          return '¥' + v.toFixed(2)
+        }
+
+        function fmtTime(ts) {
+          if (!ts) return ''
+          var d = new Date(ts)
+          var hm = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2)
+          var md = ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2)
+          var now = new Date()
+          var isToday = d.toDateString() === now.toDateString()
+          return (isToday ? '今天 ' : md + ' ') + hm
+        }
+
+        function row(label, value) {
+          return '<div><div class="k">' + label + '</div><div class="v">' + value + '</div></div>'
+        }
+
+        // tooltip 内容按状态组装；动态值均为数字或固定文案，无远端文本，无 XSS 面
+        function buildTooltip(s) {
+          if (s.status === 'ok' || s.status === 'low') {
+            var html = '<div class="bbt-title">DeepSeek 总余额（CNY）</div>'
+            html += '<div class="bbt-amount' + (s.status === 'low' ? ' is-warn' : '') + '">' + fmtCNY(s.cny) + '</div>'
+            html += '<div class="bbt-grid">'
+            html += row('充值', fmtCNY(s.toppedUp)) + row('赠送', fmtCNY(s.granted))
+            html += '</div>'
+            if (s.usd != null) {
+              html += '<div class="bbt-msg">USD 余额：$' + s.usd.toFixed(2) + '</div>'
+            }
+            if (s.status === 'low') {
+              html += '<div class="bbt-msg">余额不足，DeepSeek 已暂停服务调用，请及时充值</div>'
+            }
+            html += '<div class="bbt-msg">更新于 ' + fmtTime(s.updatedAt) + ' · 每 5 分钟自动刷新</div>'
+            html += '<div class="bbt-hint">点击徽章立即刷新</div>'
+            return html
+          }
+          if (s.status === 'auth') {
+            return '<div class="bbt-title">DeepSeek 余额</div><div class="bbt-amount is-warn">Key 已失效</div>'
+              + '<div class="bbt-msg">请在 DSH「模型」页面更新 API Key 后重试</div>'
+              + '<div class="bbt-hint">点击徽章重试</div>'
+          }
+          if (s.status === 'nocfg') {
+            return '<div class="bbt-title">DeepSeek 余额</div><div class="bbt-amount">未配置</div>'
+              + '<div class="bbt-msg">未检测到 DSH 配置的 DEEPSEEK_API_KEY</div>'
+          }
+          if (s.status === 'relay') {
+            return '<div class="bbt-title">DeepSeek 余额</div><div class="bbt-amount">—</div>'
+              + '<div class="bbt-msg">检测到自定义 API 地址（第三方中转），无法查询官方余额</div>'
+          }
+          if (s.status === 'net') {
+            return '<div class="bbt-title">DeepSeek 余额</div><div class="bbt-amount">查询失败</div>'
+              + '<div class="bbt-msg">' + (s.message || '网络异常，请稍后重试') + '</div>'
+              + '<div class="bbt-hint">点击徽章重试</div>'
+          }
+          return '<div class="bbt-title">DeepSeek 余额</div><div class="bbt-amount">查询中…</div>'
+        }
+
+        function render(s) {
+          if (!s) return
+          lastSnap = s
+          badge.dataset.status = s.status
+          if (s.status === 'ok' || s.status === 'low') {
+            amtEl.textContent = fmtNum(s.cny)
+          } else if (s.status === 'relay') {
+            amtEl.textContent = '—'
+          } else if (s.status === 'loading') {
+            amtEl.textContent = '–––'
+          } else {
+            amtEl.textContent = '—'
+          }
+          // tooltip 展开中：面板由主进程注入 DSH 内容页，随快照推送最新内容
+          if (tooltipOpen && window.dsh && typeof window.dsh.setBalanceTooltip === 'function') {
+            window.dsh.setBalanceTooltip(true, buildTooltip(s))
+          }
+        }
+
+        function resetStates() {
+          badge.classList.remove('is-hover')
+          badge.classList.remove('is-active')
+        }
+
+        function openTooltip() {
+          if (tooltipOpen) return
+          tooltipOpen = true
+          // 面板注入在 DSH 内容页（主进程 balance-tooltip IPC），内容取当前快照
+          if (lastSnap && window.dsh && typeof window.dsh.setBalanceTooltip === 'function') {
+            window.dsh.setBalanceTooltip(true, buildTooltip(lastSnap))
+          }
+        }
+
+        function closeTooltip() {
+          if (!tooltipOpen) return
+          tooltipOpen = false
+          if (window.dsh && typeof window.dsh.setBalanceTooltip === 'function') {
+            window.dsh.setBalanceTooltip(false)
+          }
+        }
+
+        // 徽章交互态：is-hover / is-active 类名（禁 :hover 伪类，原因同帮助/设置按钮）
+        badge.addEventListener('mouseenter', function () {
+          badge.classList.add('is-hover')
+        })
+        badge.addEventListener('mouseleave', resetStates)
+        badge.addEventListener('mousedown', function () {
+          badge.classList.add('is-active')
+        })
+        badge.addEventListener('mouseup', function () {
+          badge.classList.remove('is-active')
+        })
+
+        // tooltip 开合：面板注入在 DSH 内容页（独立 webContents），鼠标无法从徽章
+        // 移入面板，故离开徽章即关（与原生 tooltip 行为一致）
+        wrap.addEventListener('mouseenter', openTooltip)
+        wrap.addEventListener('mouseleave', closeTooltip)
+
+        // 失焦/聚焦时鼠标状态与 tooltip 均不可信，一并复位
+        window.addEventListener('blur', function () {
+          resetStates()
+          closeTooltip()
+        })
+        window.addEventListener('focus', resetStates)
+
+        // 点击徽章：立即给 loading 骨架反馈，再通知主进程查询
+        badge.addEventListener('click', function () {
+          render({ status: 'loading', updatedAt: 0 })
+          if (window.dsh && typeof window.dsh.refreshBalance === 'function') {
+            window.dsh.refreshBalance()
+          }
+        })
+
+        // 订阅推送 + 初始化读取当前快照（不触发查询）
+        if (window.dsh && typeof window.dsh.onBalanceUpdate === 'function') {
+          window.dsh.onBalanceUpdate(render)
+        }
+        if (window.dsh && typeof window.dsh.getBalance === 'function') {
+          window.dsh.getBalance().then(render).catch(function () { /* 保持默认骨架 */ })
+        }
       })()
     </script>
   </body>

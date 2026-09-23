@@ -1,4 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
+// 余额快照类型与主进程模块共用一个定义（仅类型导入，运行时不产生依赖）
+import type { BalanceSnapshot } from '../main/deepseek-balance'
 
 /**
  * 修复结果
@@ -119,6 +121,26 @@ const api = {
   // titlebar.html 据此复位「设置」按钮的交互态类，机制与帮助按钮一致）
   onSettingsMenuClosed: (callback: () => void): void => {
     ipcRenderer.on('settings-menu-closed', () => callback())
+  },
+  // 读取当前 DeepSeek 余额快照（不触发查询；标题栏徽章初始化时使用）。
+  // 快照只含数字与状态，绝不含 API Key
+  getBalance: (): Promise<BalanceSnapshot> => {
+    return ipcRenderer.invoke('get-balance')
+  },
+  // 触发一次余额刷新（主进程异步执行；结果经 balance-update 推送回本页）
+  refreshBalance: (): void => {
+    ipcRenderer.send('refresh-balance')
+  },
+  // 订阅余额更新推送（主进程每次查询完成后推送，覆盖启动/聚焦/轮询/手动刷新）
+  onBalanceUpdate: (callback: (snapshot: BalanceSnapshot) => void): void => {
+    ipcRenderer.on('balance-update', (_event, snapshot: BalanceSnapshot) => callback(snapshot))
+  },
+  // 余额明细 tooltip 开合通知：内容 HTML 由标题栏页构建（本地数字与固定文案），
+  // 主进程将其注入 DSH 内容页的面板展示——dshView 子视图绘制在主 webContents
+  // 之上，标题栏页内的面板会被 DSH 内容完全遮挡（早期"展开期间隐藏 dshView"
+  // 方案导致内容区黑屏，已废弃）
+  setBalanceTooltip: (open: boolean, html?: string): void => {
+    ipcRenderer.send('balance-tooltip', open, html)
   }
 }
 

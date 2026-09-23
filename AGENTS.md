@@ -68,7 +68,8 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询、npm 双源并行取最大、GitHub 上游版本信息查询（仅手动检查告知）
 │   │   ├── app-update.ts        ← 客户端更新 GitHub 检测（Release 页面引导、遗留安装包清理）
 │   │   ├── changelog.ts         ← 更新日志获取（上/本项目 GitHub Releases）+ 安全 markdown 渲染
-│   │   └── node-binary.ts       ← 内置 Node 二进制路径解析
+│   │   ├── node-binary.ts       ← 内置 Node 二进制路径解析
+│   │   └── deepseek-balance.ts  ← DeepSeek 余额查询（DSH 凭据解析 + /user/balance + 轮询订阅，见 §6.6）
 │   ├── preload/
 │   │   └── index.ts             ← contextBridge 暴露的 window.dsh.* API
 │   └── renderer/                ← 渲染层（纯 HTML，不走框架）
@@ -162,7 +163,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 ### 5.3 系统托盘与关闭流程
 
-- **系统托盘**（1.0.8 起）：启动后 `createTray()` 创建常驻托盘图标（复用 `getWindowIconPath()`，tooltip "DSH Desktop"，图标加载失败时仅记日志跳过），右键菜单仅两项：「打开主界面」（`showMainWindow()`：恢复/显示/聚焦，窗口已销毁时兜底重建）与「退出」（`confirmAndQuit()`）。
+- **系统托盘**（1.0.8 起）：启动后 `createTray()` 创建常驻托盘图标（复用 `getWindowIconPath()`，tooltip "DSH Desktop"，图标加载失败时仅记日志跳过），右键菜单含四项：「打开主界面」（`showMainWindow()`：恢复/显示/聚焦，窗口已销毁时兜底重建）/ DeepSeek 余额（只读项，随查询结果由 `updateTrayMenu()` 重建，原生菜单无法逐项着色，警示态用 ⚠ 符号 + 文案）/「刷新余额」（`refreshBalance('tray')`）/「退出」（`confirmAndQuit()`）。详见 §6.6。
 - **退出确认**：窗口关闭（WCO 关闭按钮 / Alt+F4，由 `mainWindow.on('close')` 拦截 `preventDefault`）与托盘「退出」复用同一 `confirmAndQuit()`：先弹确认框（`isQuitting` 互斥锁防重复弹框），取消则复位锁继续运行；确认后先 `tray.destroy()`（防 Windows 托盘幽灵图标）再 `app.quit()`，第二次 close 事件因 `isQuitting=true` 放行。
   - 踩坑：渲染层 JS 的 `window.close()`（如 CDP 触发）会绕过 BrowserWindow 的 `close` 事件，无法被拦截；真实用户操作（X 按钮 / Alt+F4）走 WM_CLOSE → `close` 事件，可正常拦截。
 - `window-all-closed` 事件 → 兜底 `tray.destroy()` → `stopDsh()` → Windows 上用 `taskkill /f /t` 杀整棵进程树（普通 `child.kill()` 杀不掉 npx 派生的子进程）。
@@ -185,8 +186,12 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `show-help-menu`  | renderer → main (send) | 标题栏「帮助」按钮       | 校验 sender 为主窗口 webContents 后，以按钮页内坐标（窗口相对坐标，见 §12.2 第 23 条）`Menu.popup` 弹出原生菜单（检查更新 / 更新日志子菜单 / 关于）|
 | `help-menu-closed`| main → renderer        | 主进程 `menu-will-close` | 通知 titlebar.html 复位「帮助」按钮的 hover/active 类，防止原生菜单弹出期间鼠标事件被屏蔽导致的交互态颜色残留（见 §12.1 第 24 条）|
 | `get-app-icon`    | renderer → main (invoke) | titlebar.html        | 返回应用图标 32×32 PNG data URL（nativeImage 读取 icon.ico）；受 `isTrustedSender` 守卫，失败返回空串（页面侧隐藏图标） |
+| `get-balance`     | renderer → main (invoke) | titlebar.html 徽章初始化 | 返回当前 DeepSeek 余额快照 `BalanceSnapshot`（只含状态与数字，绝不含 API Key）；受 `isTrustedSender` 守卫，不受信任时返回 net 态占位 |
+| `refresh-balance` | renderer → main (send) | titlebar.html 徽章点击 / 托盘「刷新余额」 | 触发一次余额查询（`refreshBalance('manual' \| 'tray')`）；结果经 `balance-update` 推送。受 `isTrustedSender` 守卫 |
+| `balance-update`  | main → renderer        | 主进程 `onBalanceUpdate` 订阅回调 | 每次查询完成后推送最新快照，驱动标题栏徽章渲染与托盘菜单重建 |
+| `balance-tooltip` | renderer → main (send) | titlebar.html 徽章悬停/离开 | 参数 `(open, html?)`：主进程将 tooltip 面板（内容 HTML 由标题栏页构建）注入 DSH 内容页 `#dsb-tooltip` 展示/关闭。受 `isTrustedSender` 守卫 |
 
-所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external`）的 IPC handler 入口都过 `isTrustedSender(event)`：
+所有敏感通道（`install-update` / `install-dsh-update` / `repair-dsh` / `open-external` / `get-balance` / `refresh-balance` / `balance-tooltip`）的 IPC handler 入口都过 `isTrustedSender(event)`：
 仅允许 `file:`（本地 loading/error 页）或 loopback `http(s)`（DSH 页面）的 senderFrame。防止外部页面或被劫持的 webContents 触发高危操作。
 `show-help-menu` 则直接比对 `event.sender === mainWindow.webContents`（更严格：只有标题栏页面能触发）。
 
@@ -215,6 +220,12 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `showHelpMenu(position)` | `void`                                 | 标题栏「帮助」按钮触发；把按钮坐标发给主进程，在按钮下方弹出原生帮助菜单（检查更新 / 更新日志 / 关于）|
 | `onHelpMenuClosed(cb)` | `void`                               | 订阅帮助菜单关闭通知（主进程 `menu-will-close` 时发送）；titlebar.html 据此复位按钮交互态类名 |
 | `getAppIcon()`     | `Promise<string>`                        | 读取应用图标 data URL（标题栏左侧图标显示用，失败返回空串）|
+| `getBalance()`     | `Promise<BalanceSnapshot>`               | 读取当前 DeepSeek 余额快照（不触发查询；徽章初始化用）。快照只含状态与数字，绝不含 API Key |
+| `refreshBalance()` | `void`                                   | 触发一次余额刷新（徽章点击；结果经 `onBalanceUpdate` 推送）|
+| `onBalanceUpdate(cb)` | `void`                                | 订阅余额更新推送（启动 / 聚焦 / 5 分钟轮询 / 手动刷新均会推送）|
+| `setBalanceTooltip(open, html?)` | `void`                        | 通知主进程余额明细 tooltip 开合；展开时附内容 HTML（标题栏页构建），主进程将其注入 DSH 内容页展示|
+
+> 注：上表未收录 `showSettingsMenu` / `onSettingsMenuClosed` / `onThemeChanged` 等更晚间新增的方法，以 [src/preload/index.ts](file:///e:/MyProject/IdeaProject/lingwulab-all/deepseek-harness-desktop/src/preload/index.ts) 的 api 对象为准。
 
 ---
 
@@ -271,6 +282,18 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 自 1.0.3 起移除 electron-updater 与 Gitee 回退源（原自动下载 + sha512 校验 + spawn 安装链路全部下线）。`electron-builder.yml` 不再配置 `publish` 段，打包不再生成 `resources/app-update.yml`。
 
 发布流程配套要求：GitHub 每个 release 的 **tag 必须以 `v` 开头**（如 `v1.0.3`，与 `app-update.ts` 的 `tag_name` 解析规则一致），并上传 `DSH-Desktop-Setup-<version>.exe` 安装包。
+
+### 6.6 DeepSeek 余额查询（`src/main/deepseek-balance.ts`）
+
+| 项     | 说明                                                                                                    |
+| ----- | ----------------------------------------------------------------------------------------------------- |
+| API Key 来源 | 复用 DSH 的凭据规则：**进程环境变量 `DEEPSEEK_API_KEY` 优先**，其次 `$DSH_HOME/.credentials.yaml` 的 `refs.DEEPSEEK_API_KEY`（`DSH_HOME` 未设时为 `~/.dsh`）。该文件由 DSH 进程自行读写，本模块**只读**，行解析（不引 YAML 依赖），解析失败降级为 `nocfg` 状态 |
+| 查询接口   | `GET https://api.deepseek.com/user/balance`（官方公开接口），`Authorization: Bearer <key>`，走 Electron `net.fetch`（遵循 §12.1 第 18 条），10s 超时 `AbortController` |
+| 刷新时机   | DSH 就绪后首次（`refreshBalance('startup')`）→ 每 5 分钟轮询（`startBalancePolling`）→ 窗口聚焦（30s 防抖）→ 徽章点击 / 托盘「刷新余额」 |
+| 状态机     | `ok` / `low`（余额不足：`is_available=false` 或余额 ≤ 0）/ `auth`（401）/ `nocfg`（无 Key）/ `net`（网络或 HTTP 错误）/ `relay`（`DEEPSEEK_BASE_URL` 指向非官方域名）/ `loading` |
+| 展示形态   | 标题栏 `titlebar.html` 常驻徽章（状态圆点 + `¥金额`，悬停出明细 tooltip：总余额/充值/赠送/更新时间——面板经主进程注入 DSH 内容页展示，见 §12.1 第 27 条）；托盘菜单第二项同步展示（原生菜单无逐项着色，警示态用 ⚠ 符号 + 文案） |
+| 安全约束   | API Key 只存在于主进程模块内：日志仅打掩码（前 6 位 + 长度）、绝不进渲染层快照、绝不注入 dshView；相关 IPC 全部过 `isTrustedSender` |
+| 并发保护   | `inFlight` 互斥（无并发请求）；`pollTimer.unref()` 不拖住进程；退出路径 `stopBalancePolling()` |
 
 ---
 
@@ -498,6 +521,27 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
       a) **install 脚本白名单**：npm 11.19 默认不执行未放行的生命周期脚本，输出 `npm warn install-scripts ... not yet covered by allowScripts`（实测 DSH 0.1.5-rc.1 / rc.2 的 node-pty / koffi / protobufjs / @deepseek-ai/dsh-subprocess-local 全部被延后）。当前依赖集下无功能影响（原生绑定都由 tarball 自带的 prebuild 提供，已用客户端内真实「更新 DSH」流程实测：rc.1 → rc.2 下载 / 完整性校验 / npm install 518 包 / ABI 校验 / 激活 / 重启全部通过），但若上游引入需要 install 脚本产物的模块，修复出的缓存会缺产物。
       b) **`--target` / `npm_config_target` 不再决定编译目标**：npm 11.19 对 `target` / `arch` / `disturl` 三个环境变量报 `npm warn Unknown env config "..."`；实测 node-gyp 12.4.0 **完全忽略 `--target`**（分别传 `--target=22.19.0` 与 `--target=24.16.0`，生成的 `build/config.gypi` 里 `"target"` 仍是运行 node-gyp 的 `24.21.0`、`node_module_version` 仍为 137，也不会去下载对应版本的头文件），编译目标始终等于**运行它的那个 Node**。结论：`PATH` 前置 `getNodeDir()` 不再是“双保险”，而是**唯一的 ABI 对齐机制，绝对不能删**；`npm_config_target` 继续保留无害，但不要依赖它做对齐，ABI 兜底只靠 `assertNativeModulesLoadable` 与启动自愈。探针附带结论：内置 Node 升到 v24 后，nan 源码编译型模块（实测 fs-ext）能正常按 ABI 137 编译并在内置 Node 下 `require` 成功。
     - 改动 dsh-repair 安装 env / 参数后，至少跑一次等价复跑验证（空目录 cwd + 同款 env + 拉起临时安装的 DSH），不要只看 `npm run build` 通过。实测踩坑：在仓库根目录误跑该验证会因 `--omit=dev` 把项目 devDependencies 从 `node_modules` 里抽掉（需 `npm install` 恢复）——验证必须在临时空目录里跑。
+
+27. **余额 tooltip 必须注入 DSH 内容页，不能放在标题栏页**。
+    - `dshView` 子视图绘制在主 webContents **之上**：标题栏页（titlebar.html）内任何下探到内容区的面板都会被 DSH 内容完全盖住。
+    - 历史方案「展开期间主进程 `dshView.setVisible(false)`、关闭后恢复」已废弃：隐藏后露出主 webContents 48px 以下无背景区域 → 内容区整片黑屏，实测不可接受（用户视效反馈）。
+    - 现行方案：标题栏页只构建 tooltip 内容 HTML（`buildTooltip`，本地数字与固定文案无远端文本），经 `balance-tooltip` IPC（`(open, html)`）发主进程；主进程 `showBalanceTooltip` 把面板注入 DSH 页（`#dsb-tooltip`：`position:fixed; top:56px; left:242px; z-index:2147483646; pointer-events:none`）。`left` 与 titlebar.html 的 `.bb-wrap` 硬编码同源（徽章位置），调徽章位置两处必须同步。
+    - `did-finish-load`（内容视图每次文档加载完成）预注入外壳保证首次悬停零延迟；`showBalanceTooltip` 内也有外壳缺失补建兜底（SPA 路由替换 body 的极端场景）。
+    - 面板主题走 `prefers-color-scheme` 媒体查询（DSH 页已由 `applyEmulateMedia` 按生效主题模拟），无需单独同步变量；CSS 选择器全部加 `#dsb-tooltip` 前缀，防与 DSH 页自身样式（`.k`/`.v` 等通用类名）碰撞。
+    - 关闭策略为「离开徽章即关」（与原生 tooltip 一致，用户确认方案①）：面板在 DSH 页（独立 webContents），鼠标无法从徽章移入面板。若未来要做「可移入面板」，需增加跨 webContents 悬停 IPC 协议。
+    - 不要再把 titlebar.html 的 `html, body` 改回 `overflow: visible`：tooltip 已不在本页下探，48px 内内容不会溢出。
+    - 徽章金额不要走 `fmtCNY`（自带 ¥ 前缀）：徽章的 ¥ 由独立符号位 `.bb-symbol` 提供（窄窗口 ≤540px 可单独隐藏），格式化必须走 `fmtNum`（无前缀），否则叠加成双 ¥（实测踩坑）。
+28. **余额功能的 API Key 不要出主进程、不要进日志**。
+    - `deepseek-balance.ts` 解析的 Key 仅本地用于请求；日志只打掩码（前 6 位 + 长度）。
+    - IPC 快照（`BalanceSnapshot`）只含状态与数字；绝不注入 dshView（DSH 页面是第三方内容，有 XSS 面）。
+    - `DEEPSEEK_BASE_URL` 指向非官方域名时走 `relay` 静默降级，不要对中转站 Key 强行查官方接口刷 401 打扰用户。
+29. **不要给托盘原生菜单的余额项上色，也不要做成可点击项**。
+    - `Menu.buildFromTemplate` 无逐项颜色 API：警示态用 `⚠` / `●` 符号 + 文案表达（红/橙等醒目色只存在于标题栏徽章 CSS）。
+    - 余额项 `enabled: false` 防误点；刷新动作单独放「刷新余额」项；菜单/tooltip 由 `onBalanceUpdate` 订阅回调里的 `updateTrayMenu()` 重建。
+30. **不要依赖 `ready-to-show` 单独完成窗口显示**。
+    - `show: false` + `ready-to-show` 组合存在**时序竞争**（事件在监听挂载前触发或丢失），窗口将永远停在不可见状态：现象为进程、托盘、DSH 服务全部正常，但屏幕上没有窗口（实测 dev 模式多次复现，本机概率很高，非偶发）。
+    - `createWindow()` 内 `ready-to-show` 处理器之后已挂 3s 延迟兜底：未 `isQuitting`、未最小化、未销毁且不可见则强制 `show()` 并打 warn 日志（`[DSH] ready-to-show 未按时触发，已兜底显示窗口`）。删掉它就是把 competition 变成用户可见 bug。
+    - 兜底 timer 必须 `unref()`（避免拖住事件循环）；守卫里的 `isMinimized()` 不能省——用户 3s 内手动最小化时兜底不得把窗口再拉出来。
 
 ### 12.2 改之前要确认
 
