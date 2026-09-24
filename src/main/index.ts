@@ -260,13 +260,15 @@ function syncInjectedTheme(): void {
  *
  * 主题适配走 prefers-color-scheme 媒体查询：DSH UI 本身响应该媒体查询
  * （applyEmulateMedia 按生效主题模拟），面板随之自动切换，无需额外同步变量。
- * 水平坐标 left 与 titlebar.html 的 .bb-wrap left 硬编码同源（徽章位置），
- * 调整徽章位置时两处需同步。选择器统一加 #dsb-tooltip 前缀，
- * 避免与 DSH 页面自身样式（.k/.v 等通用类名）碰撞。
+ * 垂直定位 top:0 —— dshView 视口从标题栏底（y=48）开始，面板顶紧贴标题栏
+ * 下沿即"紧贴徽章下方"的物理极限（徽章底 y=38 与标题栏底 y=48 之间属标题栏
+ * 区域，dshView 无法绘制）。left:242px 仅为缺省兜底（与 .bb-wrap 同源），
+ * 展开时由 showBalanceTooltip 按徽章实时 rect 动态计算左对齐 left。
+ * 选择器统一加 #dsb-tooltip 前缀，避免与 DSH 页面自身样式碰撞。
  */
 const BALANCE_TOOLTIP_CSS = [
   '#dsb-tooltip {',
-  '  position: fixed; top: 56px; left: 242px; width: 264px;',
+  '  position: fixed; top: 0; left: 242px; width: 264px;',
   '  padding: 14px 16px; border-radius: 10px;',
   '  border: 1px solid #dcdcdc; background: #ffffff;',
   '  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);',
@@ -331,9 +333,16 @@ function injectBalanceTooltipShell(): void {
  * html 由标题栏页构建（buildTooltip：本地数字与固定文案，无远端文本），
  * 经 JSON.stringify 安全嵌入注入代码。外壳缺失时一并补建（单次往返），
  * 覆盖 SPA 路由替换 body 的极端场景。
+ *
+ * anchor 为徽章实时 rect（相对标题栏视口，与 dshView 视口水平坐标一致），
+ * 用于面板左边缘对齐徽章左边缘：left = 徽章 left，clamp 到视口内。
+ * anchor 缺省（tooltip 展开中的数据刷新）时保持现有 left 不动，避免刷新跳动。
  */
-function showBalanceTooltip(html: string): void {
+function showBalanceTooltip(html: string, anchor?: { left: number; width: number }): void {
   if (!dshView || dshView.webContents.isDestroyed() || !isDshPageLoaded()) return
+  const hasAnchor =
+    anchor != null && Number.isFinite(anchor.left) && Number.isFinite(anchor.width)
+  const anchorCode = hasAnchor ? JSON.stringify({ left: anchor.left, width: anchor.width }) : 'null'
   const code = `
     (function () {
       if (!document.getElementById('dsb-tooltip')) {
@@ -348,6 +357,13 @@ function showBalanceTooltip(html: string): void {
       var panel = document.getElementById('dsb-tooltip')
       panel.innerHTML = ${JSON.stringify(html)}
       panel.hidden = false
+      var anchor = ${anchorCode}
+      if (anchor) {
+        var vw = document.documentElement.clientWidth
+        var left = anchor.left
+        left = Math.max(8, Math.min(left, vw - panel.offsetWidth - 8))
+        panel.style.left = left + 'px'
+      }
       return 'shown'
     })()
   `
@@ -1449,11 +1465,11 @@ ipcMain.on('refresh-balance', (event) => {
 // 面板注入在 DSH 内容页内（见 injectBalanceTooltipShell 注释）：dshView 子视图
 // 绘制在主 webContents 之上，标题栏页内的面板会被 DSH 内容完全遮挡（早期版本
 // 用展开期间 dshView.setVisible(false) 规避，导致内容区黑屏，已废弃）
-ipcMain.on('balance-tooltip', (event, open: boolean, html?: string) => {
+ipcMain.on('balance-tooltip', (event, open: boolean, html?: string, anchor?: { left: number; width: number }) => {
   if (!isTrustedSender(event)) return
   if (open === true) {
     if (typeof html !== 'string') return
-    showBalanceTooltip(html)
+    showBalanceTooltip(html, anchor)
   } else {
     hideBalanceTooltip()
   }

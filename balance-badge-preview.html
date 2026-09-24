@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DSH Desktop · DeepSeek 余额徽章效果预览</title>
+<style>
+  /* ============================================================
+   * 预览页框架样式（非真实组件，仅用于承载样机）
+   * ============================================================ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --page-bg: #151517;
+    --panel-bg: #1d1d20;
+    --panel-border: #2e2e33;
+    --text-main: #e6e6e6;
+    --text-dim: #9a9aa2;
+    --text-faint: #6c6c74;
+  }
+  html[data-theme="light"] {
+    --page-bg: #e9e9ec;
+    --panel-bg: #f6f6f8;
+    --panel-border: #d8d8de;
+    --text-main: #1f1f22;
+    --text-dim: #5c5c64;
+    --text-faint: #8c8c94;
+  }
+  body {
+    background: var(--page-bg);
+    color: var(--text-main);
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 28px 32px 60px;
+    min-width: 1080px;
+  }
+  h1 { font-size: 18px; font-weight: 600; }
+  .subtitle { font-size: 12.5px; color: var(--text-dim); margin-top: 6px; line-height: 1.7; }
+  .section { margin-top: 34px; }
+  .section-title {
+    font-size: 13px; font-weight: 600; color: var(--text-main);
+    margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::before {
+    content: ""; width: 3px; height: 13px; border-radius: 2px;
+    background: #4c8dff;
+  }
+  .section-title small { font-weight: 400; color: var(--text-faint); font-size: 11.5px; }
+
+  /* 控制面板 */
+  .control-panel {
+    margin-top: 18px; background: var(--panel-bg);
+    border: 1px solid var(--panel-border); border-radius: 10px;
+    padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+  }
+  .control-group { display: flex; align-items: center; gap: 8px; }
+  .control-label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+  .ctrl-btn {
+    font-size: 12px; font-family: inherit; cursor: pointer;
+    padding: 5px 12px; border-radius: 6px;
+    border: 1px solid var(--panel-border); background: transparent; color: var(--text-dim);
+    transition: all .15s;
+  }
+  .ctrl-btn:hover { color: var(--text-main); border-color: #55555e; }
+  .ctrl-btn.is-on { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  .ctrl-hint { font-size: 11.5px; color: var(--text-faint); }
+
+  /* ============================================================
+   * 一、仿真窗口（标题栏即真实组件的 1:1 视觉模型）
+   * ============================================================ */
+  .mock-window {
+    width: 920px; border-radius: 10px;
+    /* 不能用 overflow:hidden：余额明细 tooltip 要从标题栏下探到内容区，
+       裁切后看不到。圆角改由首尾两段自带 */
+    border: 1px solid var(--panel-border);
+    box-shadow: 0 18px 48px rgba(0,0,0,.45);
+    background: var(--panel-bg);
+  }
+  html[data-theme="light"] .mock-window { box-shadow: 0 12px 36px rgba(0,0,0,.18); }
+  .mock-window > .titlebar { border-radius: 10px 10px 0 0; z-index: 20; }
+  .mock-window > .mock-taskbar { border-radius: 0 0 10px 10px; position: relative; z-index: 20; }
+
+  /* ---------- 以下为“真实标题栏”区域，与 titlebar.html 变量/尺寸保持一致 ---------- */
+  .titlebar {
+    /* 真实约束：高度必须 = 主进程 titleBarOverlay.height（当前 48px），
+       背景必须与 titleBarOverlay.color 同步，漏一处即色差断层 */
+    position: relative; height: 48px;
+    --tb-bg: #202020;
+    --tb-text: #e6e6e6;
+    --tb-btn-hover: rgba(255,255,255,.10);
+    --tb-btn-active: rgba(255,255,255,.16);
+    background: var(--tb-bg); color: var(--tb-text);
+    user-select: none;
+  }
+  html[data-theme="light"] .titlebar {
+    --tb-bg: #f3f3f3;
+    --tb-text: #1f1f1f;
+    --tb-btn-hover: rgba(0,0,0,.06);
+    --tb-btn-active: rgba(0,0,0,.10);
+  }
+  .tb-app-icon {
+    position: absolute; left: 12px; top: 16px; width: 16px; height: 16px;
+  }
+  .tb-title {
+    position: absolute; left: 38px; top: 0; height: 48px; line-height: 48px;
+    font-size: 12px; font-weight: 500; white-space: nowrap;
+  }
+
+  /* 右侧控件统一改用 right 锚定（WCO 三键固定占 138px）。
+     注意：真实 titlebar.html 现为 left 定位，集成本徽章时需将
+     设置/帮助按钮一并改为 right 锚定，避免徽章与按钮坐标打架。 */
+  .tb-btn {
+    position: absolute; top: 10px; height: 28px; width: 48px;
+    border: none; border-radius: 6px; background: transparent;
+    color: var(--tb-text); font-size: 12px; font-family: inherit;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .tb-help  { right: 146px; }
+  .tb-settings { right: 202px; }
+  .tb-btn.is-hover { background: var(--tb-btn-hover); }
+  .tb-btn.is-active { background: var(--tb-btn-active); }
+
+  /* WCO 窗口三键（系统绘制，此处仅仿真） */
+  .wco {
+    position: absolute; top: 0; right: 0; width: 138px; height: 48px;
+    display: flex;
+  }
+  .wco-btn {
+    width: 46px; height: 48px; display: flex; align-items: center; justify-content: center;
+    color: var(--tb-text);
+  }
+  .wco-btn:hover { background: var(--tb-btn-hover); }
+  .wco-btn.wco-close:hover { background: #e81123; color: #fff; }
+
+  /* ---------------- 余额徽章（核心新组件） ---------------- */
+  /* 浅色徽章色板有两个触发源：页面浅色主题，或画廊中固定浅色对照行
+     （.titlebar[data-badge-theme="light"]）。两套选择器声明必须完全对称。 */
+  .balance-badge {
+    position: absolute; top: 10px; right: 258px; height: 28px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 10px; border-radius: 6px;
+    font-size: 12px; font-weight: 500; line-height: 1;
+    cursor: pointer; white-space: nowrap;
+    color: #9aa0a8;
+    background: rgba(255,255,255,.06);
+    border: 1px solid transparent;
+    transition: background .15s, border-color .15s;
+  }
+  :root[data-theme="light"] .balance-badge,
+  .titlebar[data-badge-theme="light"] .balance-badge {
+    color: #666b74; background: rgba(0,0,0,.05);
+  }
+  .balance-badge.is-hover { background: rgba(255,255,255,.12); }
+  :root[data-theme="light"] .balance-badge.is-hover,
+  .titlebar[data-badge-theme="light"] .balance-badge.is-hover { background: rgba(0,0,0,.09); }
+  .balance-badge .bb-ico { width: 13px; height: 13px; flex: none; display: flex; }
+  .balance-badge .bb-ico svg { width: 13px; height: 13px; }
+  .balance-badge .bb-text { font-variant-numeric: tabular-nums; }
+  .balance-badge .bb-spin {
+    width: 11px; height: 11px; border-radius: 50%; flex: none;
+    border: 1.5px solid currentColor; border-top-color: transparent;
+    animation: bb-spin .7s linear infinite;
+  }
+  @keyframes bb-spin { to { transform: rotate(360deg); } }
+
+  /* 状态：正常 —— 绿色语义色（克制，不抢眼） */
+  .balance-badge.st-ok {
+    color: #7ee787;
+    background: rgba(63,185,80,.13);
+  }
+  :root[data-theme="light"] .balance-badge.st-ok,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-ok {
+    color: #1a7f37; background: rgba(26,127,55,.10);
+  }
+  .balance-badge.st-ok.is-hover { background: rgba(63,185,80,.22); }
+  :root[data-theme="light"] .balance-badge.st-ok.is-hover,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-ok.is-hover { background: rgba(26,127,55,.18); }
+
+  /* 状态：余额不足 —— 红色强警示 + 脉冲呼吸（压迫感最强） */
+  .balance-badge.st-low {
+    color: #ff7b72;
+    background: rgba(248,81,73,.16);
+    border-color: rgba(248,81,73,.45);
+    animation: bb-danger-pulse 1.6s ease-in-out infinite;
+  }
+  :root[data-theme="light"] .balance-badge.st-low,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-low {
+    color: #cf222e; background: rgba(207,34,46,.10);
+    border-color: rgba(207,34,46,.4);
+  }
+  @keyframes bb-danger-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(248,81,73,.45); }
+    50%      { box-shadow: 0 0 0 5px rgba(248,81,73,0); }
+  }
+  .balance-badge.st-low .bb-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none;
+    animation: bb-blink 1s steps(2, start) infinite;
+  }
+  @keyframes bb-blink { 50% { opacity: .25; } }
+
+  /* 状态：Key 失效（401）—— 橙色警示 */
+  .balance-badge.st-auth {
+    color: #f5b444;
+    background: rgba(245,158,11,.14);
+    border-color: rgba(245,158,11,.38);
+  }
+  :root[data-theme="light"] .balance-badge.st-auth,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-auth {
+    color: #9a6700; background: rgba(210,153,34,.13);
+    border-color: rgba(173,127,0,.4);
+  }
+  /* 状态：网络异常 / 未配置 / 中转站 —— 中性灰，静默降级 */
+  .balance-badge.st-net,
+  .balance-badge.st-nocfg,
+  .balance-badge.st-relay {
+    color: #9aa0a8;
+  }
+  :root[data-theme="light"] .balance-badge.st-net,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-net,
+  :root[data-theme="light"] .balance-badge.st-nocfg,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-nocfg,
+  :root[data-theme="light"] .balance-badge.st-relay,
+  .titlebar[data-badge-theme="light"] .balance-badge.st-relay {
+    color: #666b74;
+  }
+
+  /* ---------------- 余额明细 Tooltip ---------------- */
+  .bb-wrap { position: absolute; top: 10px; right: 258px; height: 28px; }
+  .balance-badge { position: static; }
+  .bb-tooltip {
+    position: absolute; top: 36px; right: 0; z-index: 50;
+    width: 258px; border-radius: 10px;
+    background: #2b2b2f; border: 1px solid #3d3d43;
+    box-shadow: 0 12px 32px rgba(0,0,0,.5);
+    padding: 13px 14px 11px;
+    color: #e6e6e6; font-size: 12px;
+    opacity: 0; visibility: hidden; transform: translateY(-4px);
+    transition: opacity .15s, transform .15s, visibility .15s;
+    pointer-events: none; text-align: left;
+  }
+  .bb-wrap.is-open .bb-tooltip,
+  .bb-wrap:hover .bb-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+  .bb-tooltip::before {
+    content: ""; position: absolute; top: -5px; right: 26px;
+    width: 9px; height: 9px; background: #2b2b2f;
+    border-left: 1px solid #3d3d43; border-top: 1px solid #3d3d43;
+    transform: rotate(45deg);
+  }
+  .tt-head { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; }
+  .tt-head .tt-src { font-weight: 400; color: #8b8b94; font-size: 11px; margin-left: auto; }
+  .tt-balance { margin-top: 10px; display: flex; align-items: baseline; gap: 6px; }
+  .tt-balance .tt-amount { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tt-balance .tt-cur { font-size: 12px; color: #9a9aa2; }
+  .tt-breakdown { margin-top: 4px; color: #9a9aa2; font-size: 11.5px; line-height: 1.7; }
+  .tt-usd { margin-top: 2px; color: #9a9aa2; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .tt-meta {
+    margin-top: 10px; padding-top: 8px; border-top: 1px solid #3d3d43;
+    display: flex; justify-content: space-between; color: #7d7d86; font-size: 11px;
+  }
+  .tt-alert {
+    margin-top: 9px; border-radius: 7px; padding: 8px 10px;
+    font-size: 11.5px; line-height: 1.6; display: flex; gap: 7px;
+  }
+  .tt-alert svg { width: 14px; height: 14px; flex: none; margin-top: 1px; }
+  .tt-alert.al-low { background: rgba(248,81,73,.12); color: #ff9490; border: 1px solid rgba(248,81,73,.3); }
+  .tt-alert.al-auth { background: rgba(245,158,11,.10); color: #f5c168; border: 1px solid rgba(245,158,11,.28); }
+  .tt-alert.al-net  { background: rgba(255,255,255,.05); color: #a9a9b2; border: 1px solid #3d3d43; }
+  .tt-alert.al-cfg  { background: rgba(255,255,255,.05); color: #a9a9b2; border: 1px solid #3d3d43; }
+  .tt-alert.al-relay { background: rgba(255,255,255,.05); color: #a9a9b2; border: 1px solid #3d3d43; }
+  .tt-click-hint { margin-top: 8px; color: #6c6c74; font-size: 10.5px; }
+
+  /* ---------- 仿真内容区（dshView 占位，非真实组件） ---------- */
+  .mock-content {
+    height: 300px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(900px 300px at 70% -10%, rgba(76,141,255,.10), transparent 60%),
+      linear-gradient(180deg, #26262a, #1f1f23);
+  }
+  html[data-theme="light"] .mock-content {
+    background:
+      radial-gradient(900px 300px at 70% -10%, rgba(76,141,255,.08), transparent 60%),
+      linear-gradient(180deg, #ffffff, #f4f4f7);
+  }
+  .mock-line {
+    position: absolute; left: 28px; height: 9px; border-radius: 5px;
+    background: rgba(255,255,255,.07);
+  }
+  html[data-theme="light"] .mock-line { background: rgba(0,0,0,.07); }
+  .mock-line.l1 { top: 34px; width: 240px; }
+  .mock-line.l2 { top: 62px; width: 520px; }
+  .mock-line.l3 { top: 82px; width: 460px; }
+  .mock-card {
+    position: absolute; right: 28px; bottom: 28px; width: 230px; height: 96px;
+    border-radius: 10px; border: 1px dashed rgba(255,255,255,.14);
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,.32); font-size: 11.5px;
+  }
+  html[data-theme="light"] .mock-card {
+    border-color: rgba(0,0,0,.16); color: rgba(0,0,0,.32);
+  }
+
+  /* ---------- 仿真任务栏 + 托盘 ---------- */
+  .mock-taskbar {
+    height: 44px; background: #18181b; border-top: 1px solid #2e2e33;
+    display: flex; align-items: center; padding: 0 12px; position: relative;
+  }
+  html[data-theme="light"] .mock-taskbar {
+    background: #f0f0f3; border-top-color: #d8d8de;
+  }
+  .tb-task-text { font-size: 11px; color: #6c6c74; }
+  .tray-area { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .tray-clock { font-size: 11px; color: #9a9aa2; text-align: right; line-height: 1.35; }
+  html[data-theme="light"] .tray-clock { color: #5c5c64; }
+  .tray-icon {
+    width: 28px; height: 28px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; position: relative;
+  }
+  .tray-icon.is-hover, .tray-icon:hover { background: rgba(255,255,255,.1); }
+  html[data-theme="light"] .tray-icon.is-hover,
+  html[data-theme="light"] .tray-icon:hover { background: rgba(0,0,0,.07); }
+  .tray-icon svg { width: 17px; height: 17px; }
+
+  /* 托盘原生菜单（Win32 风格仿真） */
+  .tray-menu {
+    position: absolute; right: 8px; bottom: 40px; z-index: 80;
+    min-width: 232px; border-radius: 8px; padding: 4px;
+    background: #2c2c30; border: 1px solid #414148;
+    box-shadow: 0 14px 38px rgba(0,0,0,.55);
+    display: none;
+  }
+  html[data-theme="light"] .tray-menu {
+    background: #f9f9fb; border-color: #d2d2d8;
+    box-shadow: 0 12px 30px rgba(0,0,0,.22);
+  }
+  .tray-menu.is-open { display: block; }
+  .tm-item {
+    height: 34px; padding: 0 12px; display: flex; align-items: center;
+    font-size: 12.5px; color: #e6e6e6; border-radius: 5px; cursor: default;
+  }
+  html[data-theme="light"] .tm-item { color: #1f1f22; }
+  .tm-item.clickable:hover { background: rgba(76,141,255,.22); }
+  html[data-theme="light"] .tm-item.clickable:hover { background: #dce8ff; }
+  .tm-item .tm-right { margin-left: auto; font-variant-numeric: tabular-nums; color: #8e8e97; }
+  .tm-sep { height: 1px; margin: 4px 8px; background: #414148; }
+  html[data-theme="light"] .tm-sep { background: #dedee4; }
+  .tm-dot { width: 7px; height: 7px; border-radius: 50%; margin-right: 9px; flex: none; }
+  .tm-dot.ok { background: #3fb950; }
+  .tm-dot.low { background: #f85149; animation: bb-blink 1s steps(2,start) infinite; }
+  .tm-dot.auth { background: #f59e0b; }
+  .tm-dot.off { background: #6c6c74; }
+  .tm-item.st-low .tm-right { color: #ff7b72; font-weight: 600; }
+  .tm-item.st-auth .tm-right { color: #f5b444; font-weight: 600; }
+  .tm-item.st-off .tm-right { color: #8e8e97; }
+
+  /* ============================================================
+   * 二、状态画廊
+   * ============================================================ */
+  .gallery { display: flex; flex-direction: column; gap: 14px; }
+  .gallery-row { display: flex; flex-direction: column; gap: 6px; }
+  .gallery-tag { font-size: 11.5px; color: var(--text-faint); padding-left: 2px; }
+  /* 画廊条自身带圆角，且悬停时 tooltip 需浮在后续条之上 */
+  .gallery-bar {
+    height: 48px; border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    position: relative; z-index: 1;
+  }
+  .gallery-bar:hover { z-index: 5; }
+  /* 画廊条用静态定位徽章（right 相对条体） */
+  .gallery-bar .balance-badge,
+  .gallery-bar .bb-wrap { top: 10px; }
+  .gallery-bar .tb-btn { display: none; }            /* 画廊中省略设置/帮助，聚焦徽章 */
+  .gallery-bar .wco { opacity: .55; }
+  .gallery-bar .bb-tooltip {
+    opacity: 0; visibility: hidden;
+  }
+  .gallery-bar:hover .bb-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+
+  /* ============================================================
+   * 三、警示色规范说明卡
+   * ============================================================ */
+  .spec-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .spec-card {
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 10px; padding: 14px;
+  }
+  .spec-card .sc-top { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; }
+  .spec-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .spec-card .sc-desc { margin-top: 8px; font-size: 11.5px; color: var(--text-dim); line-height: 1.7; }
+  .spec-chip {
+    margin-top: 10px; display: inline-flex; align-items: center; gap: 6px;
+    height: 24px; padding: 0 9px; border-radius: 5px; font-size: 11.5px; font-weight: 500;
+  }
+  .legend { font-size: 11.5px; color: var(--text-faint); margin-top: 12px; line-height: 1.8; }
+  .legend code {
+    background: rgba(255,255,255,.07); padding: 1px 5px; border-radius: 4px;
+    font-family: Consolas, monospace; font-size: 11px;
+  }
+  html[data-theme="light"] .legend code { background: rgba(0,0,0,.07); }
+</style>
+</head>
+<body>
+
+<h1>DeepSeek 余额徽章 · 效果预览</h1>
+<div class="subtitle">
+  方案：标题栏常驻徽章（设置按钮左侧）+ 托盘菜单余额项；主进程代理请求官方 <b>GET /user/balance</b>，密钥不进入渲染层。<br />
+  刷新时机：DSH 就绪后首次查询 · 窗口重新聚焦（30s 防抖）· 5 分钟轮询 · 点击徽章手动刷新。悬停徽章可查看明细 tooltip。
+</div>
+
+<!-- 控制面板 -->
+<div class="control-panel">
+  <div class="control-group">
+    <span class="control-label">样机状态</span>
+    <button class="ctrl-btn is-on" data-state="ok">正常</button>
+    <button class="ctrl-btn" data-state="low">余额不足</button>
+    <button class="ctrl-btn" data-state="auth">Key 失效</button>
+    <button class="ctrl-btn" data-state="nocfg">未配置</button>
+    <button class="ctrl-btn" data-state="net">网络异常</button>
+    <button class="ctrl-btn" data-state="relay">中转站</button>
+    <button class="ctrl-btn" data-state="loading">查询中</button>
+  </div>
+  <div class="control-group">
+    <span class="control-label">主题</span>
+    <button class="ctrl-btn is-on" id="theme-dark">深色（出厂）</button>
+    <button class="ctrl-btn" id="theme-light">浅色</button>
+  </div>
+  <span class="ctrl-hint">点击徽章可演示手动刷新；点击任务栏托盘图标查看托盘菜单</span>
+</div>
+
+<!-- ================ 一、可交互仿真窗口 ================ -->
+<div class="section">
+  <div class="section-title">仿真窗口 <small>标题栏 48px · #202020 · 徽章与 WCO 三键、设置/帮助的真实相对位置</small></div>
+  <div class="mock-window">
+    <!-- ===== 真实标题栏区域开始 ===== -->
+    <div class="titlebar">
+      <svg class="tb-app-icon" viewBox="0 0 32 32" fill="none">
+        <rect width="32" height="32" rx="7" fill="#fff"/>
+        <path d="M7 20.5c2.2 1 4.2 1 5.8-.4 1.5-1.3 1.7-3.2.5-4.7-1.3-1.7-3.7-2.1-5.2-.9-.9.7-1.3 1.7-1.1 2.9" fill="#111"/>
+        <path d="M14.5 10.5c3.4-.7 6.6.9 8 3.8.9 1.9.8 3.9-.4 5.6-1.4 2-3.9 2.9-6.5 2.4-1.9-.4-3.5-1.5-4.4-3.1 1.4.2 2.8-.2 3.8-1.2 1.2-1.2 1.4-2.9.5-4.2-.6-.9-1.5-1.5-2.6-1.7.4-.8.9-1.3 1.6-1.6z" fill="#111"/>
+      </svg>
+      <div class="tb-title">DSH Desktop</div>
+
+      <button class="tb-btn tb-settings" id="mock-settings">设置</button>
+      <button class="tb-btn tb-help" id="mock-help">帮助</button>
+
+      <!-- 余额徽章：点击手动刷新；hover 出明细 -->
+      <div class="bb-wrap" id="main-badge-wrap">
+        <div class="balance-badge st-ok" id="main-badge" role="button" aria-label="DeepSeek 余额，点击刷新" tabindex="0">
+          <span class="bb-ico" id="bb-icon"></span>
+          <span class="bb-text" id="bb-text">¥110.00</span>
+        </div>
+        <div class="bb-tooltip" id="main-tooltip"><!-- JS 渲染 --></div>
+      </div>
+
+      <div class="wco">
+        <div class="wco-btn"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 5.5h9" stroke="currentColor" stroke-width="1"/></svg></div>
+        <div class="wco-btn"><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="1" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></div>
+        <div class="wco-btn wco-close"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" stroke-width="1"/></svg></div>
+      </div>
+    </div>
+    <!-- ===== 真实标题栏区域结束 ===== -->
+
+    <div class="mock-content">
+      <div class="mock-line l1"></div>
+      <div class="mock-line l2"></div>
+      <div class="mock-line l3"></div>
+      <div class="mock-card">DSH Web UI 内容区（dshView）</div>
+    </div>
+
+    <!-- 仿真任务栏 + 托盘 -->
+    <div class="mock-taskbar">
+      <span class="tb-task-text">Windows 任务栏（仿真）</span>
+      <div class="tray-area">
+        <div class="tray-icon" id="tray-icon" title="DSH Desktop 托盘">
+          <svg viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="7" fill="#e6e6e6"/>
+            <path d="M7 20.5c2.2 1 4.2 1 5.8-.4 1.5-1.3 1.7-3.2.5-4.7-1.3-1.7-3.7-2.1-5.2-.9-.9.7-1.3 1.7-1.1 2.9" fill="#111"/>
+            <path d="M14.5 10.5c3.4-.7 6.6.9 8 3.8.9 1.9.8 3.9-.4 5.6-1.4 2-3.9 2.9-6.5 2.4-1.9-.4-3.5-1.5-4.4-3.1 1.4.2 2.8-.2 3.8-1.2 1.2-1.2 1.4-2.9.5-4.2-.6-.9-1.5-1.5-2.6-1.7.4-.8.9-1.3 1.6-1.6z" fill="#111"/>
+          </svg>
+        </div>
+        <div class="tray-clock">13:42<br />2026/9/23</div>
+      </div>
+      <!-- 托盘菜单 -->
+      <div class="tray-menu" id="tray-menu">
+        <div class="tm-item clickable">打开主界面</div>
+        <div class="tm-sep"></div>
+        <div class="tm-item" id="tm-balance">
+          <span class="tm-dot ok" id="tm-dot"></span>
+          DeepSeek 余额
+          <span class="tm-right" id="tm-right">¥110.00</span>
+        </div>
+        <div class="tm-sep"></div>
+        <div class="tm-item clickable">退出</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================ 二、全部状态画廊 ================ -->
+<div class="section">
+  <div class="section-title">全部状态一览 <small>上排深色（出厂主题），下排浅色；悬停任一条查看对应 tooltip</small></div>
+  <div class="gallery" id="gallery"></div>
+</div>
+
+<!-- ================ 三、警示色规范 ================ -->
+<div class="section">
+  <div class="section-title">状态色规范 <small>语义色仅用于余额组件；中性控件仍跟随标题栏主题</small></div>
+  <div class="spec-grid">
+    <div class="spec-card">
+      <div class="sc-top"><span class="spec-dot" style="background:#3fb950"></span>正常</div>
+      <div class="sc-desc">is_available=true。绿色低调提示，不打断使用；tooltip 展示充值/赠送明细与更新时间。</div>
+      <span class="spec-chip" style="color:#7ee787;background:rgba(63,185,80,.13)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M3 10h18M16 14h2"/></svg>
+        ¥110.00
+      </span>
+    </div>
+    <div class="spec-card">
+      <div class="sc-top"><span class="spec-dot" style="background:#f85149"></span>余额不足</div>
+      <div class="sc-desc">is_available=false 或余额≈0。红色底 + 红边 + 脉冲呼吸 + 闪烁圆点，标题栏与托盘同时变红。</div>
+      <span class="spec-chip" style="color:#ff7b72;background:rgba(248,81,73,.16);border:1px solid rgba(248,81,73,.45)">
+        <span class="bb-dot" style="width:6px;height:6px;border-radius:50%;background:currentColor"></span>
+        余额不足 ¥0.36
+      </span>
+    </div>
+    <div class="spec-card">
+      <div class="sc-top"><span class="spec-dot" style="background:#f59e0b"></span>Key 失效</div>
+      <div class="sc-desc">接口返回 401/403。橙色警示“登录失效”，tooltip 引导到 DSH Models 页面更新 Key。</div>
+      <span class="spec-chip" style="color:#f5b444;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.38)">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5M12 18v.5"/></svg>
+        Key 失效
+      </span>
+    </div>
+    <div class="spec-card">
+      <div class="sc-top"><span class="spec-dot" style="background:#6c6c74"></span>中性降级</div>
+      <div class="sc-desc">未配置 / 网络异常 / 中转站：统一灰色不打扰。网络异常附重试；中转站显示“—”并在 tooltip 说明。</div>
+      <span class="spec-chip" style="color:#9aa0a8;background:rgba(255,255,255,.06)">余额 —</span>
+    </div>
+  </div>
+  <div class="legend">
+    真实集成约束：徽章交互态沿用 titlebar.html 既有模式 <code>is-hover / is-active</code>（JS 类名，不用 :hover 伪类，避免原生菜单弹出后的态滞留）；<br />
+    新增 IPC 建议命名 <code>get-deepseek-balance</code>（invoke，主进程读凭据+net.fetch）/ <code>refresh-deepseek-balance</code>；渲染层只接收金额与状态枚举，密钥不出主进程。
+  </div>
+</div>
+
+<script>
+/* ================================================================
+ * 状态模型（即未来 IPC 返回给渲染层的数据形状，供开发参照）
+ * { status: 'ok'|'low'|'auth'|'nocfg'|'net'|'relay'|'loading',
+ *   cny: { total, granted, toppedUp }, usd?: {...}, updatedAt }
+ * ================================================================ */
+const ICONS = {
+  wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2"/><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/><path d="M16 14h2.5"/></svg>',
+  warn:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5M12 18v.5"/></svg>',
+  refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14-5.3L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14 5.3L20 16"/><path d="M20 20v-4h-4"/></svg>',
+  key:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M17 6l3 3"/></svg>',
+  dash:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>'
+};
+
+const STATES = {
+  ok: {
+    badge: { icon: 'wallet', text: '¥110.00' },
+    tray:  { dot: 'ok', text: '¥110.00', cls: '' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">官方接口</span></div>
+      <div class="tt-balance"><span class="tt-amount">¥110.00</span><span class="tt-cur">CNY</span></div>
+      <div class="tt-breakdown">充值余额 ¥100.00 · 赠送余额 ¥10.00</div>
+      <div class="tt-meta"><span>更新于 13:42:05</span><span>5 分钟后自动刷新</span></div>
+      <div class="tt-click-hint">点击徽章立即刷新</div>`
+  },
+  low: {
+    badge: { icon: 'warn', dot: true, text: '余额不足 ¥0.36' },
+    tray:  { dot: 'low', text: '¥0.36', cls: 'st-low' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">官方接口</span></div>
+      <div class="tt-balance"><span class="tt-amount" style="color:#ff7b72">¥0.36</span><span class="tt-cur">CNY</span></div>
+      <div class="tt-breakdown">充值余额 ¥0.36 · 赠送余额 ¥0.00</div>
+      <div class="tt-alert al-low">${ICONS.warn}<span>余额已不足，API 调用随时可能中断，请尽快前往 DeepSeek 开放平台充值。</span></div>
+      <div class="tt-meta"><span>更新于 13:42:05</span><span></span></div>`
+  },
+  auth: {
+    badge: { icon: 'key', text: 'Key 失效' },
+    tray:  { dot: 'auth', text: 'Key 失效', cls: 'st-auth' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">官方接口</span></div>
+      <div class="tt-alert al-auth">${ICONS.key}<span>API Key 已失效或被删除（401）。请在 DSH「Models」页面更新 Key 后点击刷新。</span></div>
+      <div class="tt-click-hint">点击徽章立即重试</div>`
+  },
+  nocfg: {
+    badge: { icon: 'key', text: '未配置 Key' },
+    tray:  { dot: 'off', text: '未配置', cls: 'st-off' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">官方接口</span></div>
+      <div class="tt-alert al-cfg">${ICONS.key}<span>未在 DSH 中检测到 DEEPSEEK_API_KEY。在「Models」页面配置 Key 后将自动显示余额。</span></div>`
+  },
+  net: {
+    badge: { icon: 'refresh', text: '获取失败' },
+    tray:  { dot: 'off', text: '获取失败', cls: 'st-off' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">官方接口</span></div>
+      <div class="tt-alert al-net">${ICONS.refresh}<span>网络异常或 api.deepseek.com 暂不可用，将在下次轮询自动重试。</span></div>
+      <div class="tt-click-hint">点击徽章立即重试</div>`
+  },
+  relay: {
+    badge: { icon: 'dash', text: '余额 —' },
+    tray:  { dot: 'off', text: '—', cls: 'st-off' },
+    tooltip: () => `
+      <div class="tt-head">DeepSeek 余额 <span class="tt-src">中转站</span></div>
+      <div class="tt-alert al-relay">${ICONS.dash}<span>当前使用自定义 API 地址（中转站），官方余额接口不适用，故不显示余额。切换回官方地址后自动恢复。</span></div>`
+  },
+  loading: {
+    badge: { spinner: true, text: '查询中' },
+    tray:  { dot: 'off', text: '查询中…', cls: 'st-off' },
+    tooltip: null
+  }
+};
+
+const STATE_LABELS = {
+  ok: '正常', low: '余额不足（红色强警示）', auth: 'Key 失效（橙色警示）',
+  nocfg: '未配置 Key（灰）', net: '网络异常（灰）', relay: '中转站（静默降级）', loading: '查询中（骨架态）'
+};
+
+/* ---------- 渲染托盘菜单余额项 ---------- */
+function renderTray(state) {
+  const s = STATES[state];
+  const item = document.getElementById('tm-balance');
+  item.className = 'tm-item ' + s.tray.cls;
+  document.getElementById('tm-dot').className = 'tm-dot ' + s.tray.dot;
+  document.getElementById('tm-right').textContent = s.tray.text;
+}
+
+function renderMain(state) {
+  const badge = document.getElementById('main-badge');
+  badge.className = 'balance-badge st-' + state;
+  const s = STATES[state];
+  badge.innerHTML = (s.badge.spinner
+      ? '<span class="bb-spin"></span>'
+      : '<span class="bb-ico">' + ICONS[s.badge.icon] + '</span>' + (s.badge.dot ? '<span class="bb-dot"></span>' : ''))
+    + '<span class="bb-text">' + s.badge.text + '</span>';
+  renderTray(state);
+  const tip = document.getElementById('main-tooltip');
+  tip.innerHTML = s.tooltip ? s.tooltip() : '';
+}
+
+/* ---------- 状态画廊 ---------- */
+function buildGallery() {
+  const gallery = document.getElementById('gallery');
+  [['dark', '深色标题栏（出厂 #202020）'], ['light', '浅色标题栏']].forEach(function (pair) {
+    const theme = pair[0], label = pair[1];
+    const row = document.createElement('div');
+    row.className = 'gallery-row';
+    row.innerHTML = '<div class="gallery-tag">' + label + '</div>';
+    Object.keys(STATES).forEach(function (state) {
+      const s = STATES[state];
+      const bar = document.createElement('div');
+      bar.className = 'gallery-bar titlebar';
+      if (theme === 'light') {
+        bar.setAttribute('data-light', '1');
+        bar.setAttribute('data-badge-theme', 'light');
+      }
+      bar.innerHTML =
+        '<div class="tb-title">' + STATE_LABELS[state] + '</div>' +
+        '<div class="bb-wrap">' +
+          '<div class="balance-badge st-' + state + '">' +
+            (s.badge.spinner
+              ? '<span class="bb-spin"></span>'
+              : '<span class="bb-ico">' + ICONS[s.badge.icon] + '</span>' + (s.badge.dot ? '<span class="bb-dot"></span>' : '')) +
+            '<span class="bb-text">' + s.badge.text + '</span>' +
+          '</div>' +
+          '<div class="bb-tooltip">' + (s.tooltip ? s.tooltip() : '') + '</div>' +
+        '</div>' +
+        '<div class="wco">' +
+          '<div class="wco-btn"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 5.5h9" stroke="currentColor" stroke-width="1"/></svg></div>' +
+          '<div class="wco-btn"><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="1" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/></svg></div>' +
+          '<div class="wco-btn wco-close"><svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" stroke-width="1"/></svg></div>' +
+        '</div>';
+      row.appendChild(bar);
+    });
+    gallery.appendChild(row);
+  });
+  // 让浅色画廊条跟随浅色色板
+  syncGalleryTheme();
+}
+
+function syncGalleryTheme() {
+  // 画廊第二行固定为浅色对照样本，不随页面主题切换
+  document.querySelectorAll('.gallery-bar[data-light]').forEach(function (bar) {
+    bar.style.setProperty('--tb-bg', '#f3f3f3');
+    bar.style.setProperty('--tb-text', '#1f1f1f');
+    bar.style.setProperty('--tb-btn-hover', 'rgba(0,0,0,.06)');
+    bar.style.setProperty('--tb-btn-active', 'rgba(0,0,0,.10)');
+  });
+}
+
+/* ---------- 交互 ---------- */
+let currentState = 'ok';
+
+document.querySelectorAll('.ctrl-btn[data-state]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('.ctrl-btn[data-state]').forEach(function (b) { b.classList.remove('is-on'); });
+    btn.classList.add('is-on');
+    currentState = btn.getAttribute('data-state');
+    renderMain(currentState);
+  });
+});
+
+document.getElementById('theme-dark').addEventListener('click', function () {
+  document.documentElement.setAttribute('data-theme', 'dark');
+  this.classList.add('is-on');
+  document.getElementById('theme-light').classList.remove('is-on');
+});
+document.getElementById('theme-light').addEventListener('click', function () {
+  document.documentElement.setAttribute('data-theme', 'light');
+  this.classList.add('is-on');
+  document.getElementById('theme-dark').classList.remove('is-on');
+});
+
+/* 点击徽章：手动刷新演示（loading 800ms 后回到正常） */
+document.getElementById('main-badge').addEventListener('click', function () {
+  const prev = currentState;
+  renderMain('loading');
+  setTimeout(function () {
+    // 演示：从“网络异常/Key失效”刷新后恢复正常；其余状态回到自身
+    renderMain(prev === 'net' || prev === 'auth' || prev === 'loading' ? 'ok' : prev);
+    if (prev === 'ok') currentState = 'ok'; else currentState = prev;
+    syncStateButtons();
+  }, 900);
+});
+function syncStateButtons() {
+  document.querySelectorAll('.ctrl-btn[data-state]').forEach(function (b) {
+    b.classList.toggle('is-on', b.getAttribute('data-state') === currentState);
+  });
+}
+
+/* 标题栏按钮 is-hover/is-active 类名交互（复刻真实模式） */
+['mock-settings', 'mock-help'].forEach(function (id) {
+  const el = document.getElementById(id);
+  el.addEventListener('mouseenter', function () { el.classList.add('is-hover'); });
+  el.addEventListener('mouseleave', function () { el.classList.remove('is-hover', 'is-active'); });
+  el.addEventListener('mousedown', function () { el.classList.add('is-active'); });
+  el.addEventListener('mouseup', function () { el.classList.remove('is-active'); });
+});
+const badgeEl = document.getElementById('main-badge');
+badgeEl.addEventListener('mouseenter', function () { badgeEl.classList.add('is-hover'); });
+badgeEl.addEventListener('mouseleave', function () { badgeEl.classList.remove('is-hover'); });
+
+/* 托盘菜单开关（真实为 Tray + Menu.popup，此处 HTML 仿真） */
+const trayIcon = document.getElementById('tray-icon');
+const trayMenu = document.getElementById('tray-menu');
+trayIcon.addEventListener('click', function (e) {
+  e.stopPropagation();
+  trayMenu.classList.toggle('is-open');
+});
+document.addEventListener('click', function (e) {
+  if (!trayMenu.contains(e.target)) trayMenu.classList.remove('is-open');
+});
+
+buildGallery();
+renderMain('ok');
+</script>
+</body>
+</html>

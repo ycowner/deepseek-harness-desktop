@@ -139,8 +139,8 @@ const api = {
   // 主进程将其注入 DSH 内容页的面板展示——dshView 子视图绘制在主 webContents
   // 之上，标题栏页内的面板会被 DSH 内容完全遮挡（早期"展开期间隐藏 dshView"
   // 方案导致内容区黑屏，已废弃）
-  setBalanceTooltip: (open: boolean, html?: string): void => {
-    ipcRenderer.send('balance-tooltip', open, html)
+  setBalanceTooltip: (open: boolean, html?: string, anchor?: { left: number; width: number }): void => {
+    ipcRenderer.send('balance-tooltip', open, html, anchor)
   }
 }
 

@@ -142,17 +142,11 @@
       }
 
       /* ==================== DeepSeek 余额徽章 ==================== */
-      /* 数据由主进程 deepseek-balance.ts 查询后经 IPC 推送（只含数字，绝不含 API Key）。
+      /* 样式对齐设计稿 balance-badge-preview.html（验收基准）：状态图标 + 分态色板 +
+         low 整徽章脉冲。数据由主进程 deepseek-balance.ts 查询后经 IPC 推送（只含数字，绝不含 API Key）。
          交互态沿用 is-hover / is-active 类名，不使用 :hover / :active 伪类
-         （原因见上方按钮注释：原生菜单期间收不到鼠标事件，伪类会滞留） */
-
-      :root {
-        --bb-warn-strong: #ef4444;
-      }
-
-      :root[data-theme='dark'] {
-        --bb-warn-strong: #ff6b6b;
-      }
+         （原因见上方按钮注释：原生菜单期间收不到鼠标事件，伪类会滞留）。
+         主题机制与全页一致：默认浅色值，:root[data-theme='dark'] 覆盖深色值 */
 
       /* 徽章容器：紧贴帮助按钮右侧（帮助按钮 left:186 + 宽48 + 8 间距）。
          余额明细 tooltip 不在本页渲染（dshView 子视图绘制在主 webContents 之上会遮挡），
@@ -164,26 +158,39 @@
         height: 28px;
       }
 
+      /* 徽章基础：半透明底 + 中性灰字 + 1px 透明边框占位（警示态显边框时尺寸不跳动） */
       .balance-badge {
         height: 28px;
         padding: 0 10px;
-        border: none;
+        border: 1px solid transparent;
         border-radius: 6px;
-        background: transparent;
-        color: var(--tb-text);
+        background: rgba(0, 0, 0, 0.05);
+        color: #666b74;
         font-size: 12px;
+        font-weight: 500;
+        line-height: 1;
         font-family: inherit;
         display: flex;
         align-items: center;
         gap: 6px;
         cursor: pointer;
         white-space: nowrap;
+        transition: background 0.15s, border-color 0.15s;
         /* 必须脱离拖拽区域，否则点击事件不会触发 */
         -webkit-app-region: no-drag;
       }
 
+      :root[data-theme='dark'] .balance-badge {
+        background: rgba(255, 255, 255, 0.06);
+        color: #9aa0a8;
+      }
+
       .balance-badge.is-hover {
-        background: var(--tb-btn-hover);
+        background: rgba(0, 0, 0, 0.09);
+      }
+
+      :root[data-theme='dark'] .balance-badge.is-hover {
+        background: rgba(255, 255, 255, 0.12);
       }
 
       .balance-badge.is-active {
@@ -199,64 +206,125 @@
         outline-offset: -1px;
       }
 
-      /* 状态圆点：ok 绿 / low 红（脉冲）/ auth 橙 / 其余灰 / loading 闪烁 */
-      .bb-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #22c55e;
+      /* 状态图标：13x13，随状态切换钱包/警告/钥匙/刷新/横杠（内容见脚本 ICONS） */
+      .bb-ico {
+        width: 13px;
+        height: 13px;
         flex: none;
+        display: flex;
       }
 
-      .balance-badge[data-status='low'] .bb-dot {
-        background: var(--bb-warn-strong);
-        animation: bb-pulse 1.2s ease-in-out infinite;
+      .bb-ico svg {
+        width: 13px;
+        height: 13px;
       }
 
-      .balance-badge[data-status='auth'] .bb-dot {
-        background: #f59e0b;
+      .bb-text {
+        font-variant-numeric: tabular-nums;
       }
 
-      .balance-badge[data-status='nocfg'] .bb-dot,
-      .balance-badge[data-status='net'] .bb-dot,
-      .balance-badge[data-status='relay'] .bb-dot {
-        background: #8a8a8a;
+      /* ¥ 符号位与金额紧贴：负 margin 抵消 flex gap（窄窗口符号隐藏后不影响布局） */
+      .balance-badge .bb-symbol {
+        margin-right: -6px;
       }
 
-      .balance-badge[data-status='loading'] .bb-dot {
-        background: #8a8a8a;
-        animation: bb-blink 1s linear infinite;
+      /* loading 旋转圈 */
+      .bb-spin {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        flex: none;
+        border: 1.5px solid currentColor;
+        border-top-color: transparent;
+        animation: bb-spin 0.7s linear infinite;
       }
 
-      /* 状态着色：low 红底脉冲（最醒目）/ auth 橙字 / 其余跟随主题中性色 */
+      /* low 态闪烁圆点：仅余额不足时由脚本渲染（6px） */
+      .bb-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        flex: none;
+        animation: bb-blink 1s steps(2, start) infinite;
+      }
+
+      /* 状态：正常 —— 绿色语义色（克制，不抢眼） */
+      .balance-badge[data-status='ok'] {
+        color: #1a7f37;
+        background: rgba(26, 127, 55, 0.1);
+      }
+
+      :root[data-theme='dark'] .balance-badge[data-status='ok'] {
+        color: #7ee787;
+        background: rgba(63, 185, 80, 0.13);
+      }
+
+      .balance-badge[data-status='ok'].is-hover {
+        background: rgba(26, 127, 55, 0.18);
+      }
+
+      :root[data-theme='dark'] .balance-badge[data-status='ok'].is-hover {
+        background: rgba(63, 185, 80, 0.22);
+      }
+
+      /* 状态：余额不足 —— 红色强警示 + 整徽章脉冲呼吸（压迫感最强） */
       .balance-badge[data-status='low'] {
-        color: var(--bb-warn-strong);
-        background: rgba(239, 68, 68, 0.14);
+        color: #cf222e;
+        background: rgba(207, 34, 46, 0.1);
+        border-color: rgba(207, 34, 46, 0.4);
+        animation: bb-danger-pulse 1.6s ease-in-out infinite;
       }
 
+      :root[data-theme='dark'] .balance-badge[data-status='low'] {
+        color: #ff7b72;
+        background: rgba(248, 81, 73, 0.16);
+        border-color: rgba(248, 81, 73, 0.45);
+      }
+
+      /* 状态：Key 失效（401）—— 橙色警示 */
       .balance-badge[data-status='auth'] {
-        color: #f59e0b;
+        color: #9a6700;
+        background: rgba(210, 153, 34, 0.13);
+        border-color: rgba(173, 127, 0, 0.4);
       }
 
-      :root[data-theme='light'] .balance-badge[data-status='auth'] {
-        color: #b06000;
+      :root[data-theme='dark'] .balance-badge[data-status='auth'] {
+        color: #f5b444;
+        background: rgba(245, 158, 11, 0.14);
+        border-color: rgba(245, 158, 11, 0.38);
       }
 
-      @keyframes bb-pulse {
+      /* 状态：网络异常 / 未配置 / 中转站 —— 中性灰，静默降级 */
+      .balance-badge[data-status='net'],
+      .balance-badge[data-status='nocfg'],
+      .balance-badge[data-status='relay'] {
+        color: #666b74;
+      }
+
+      :root[data-theme='dark'] .balance-badge[data-status='net'],
+      :root[data-theme='dark'] .balance-badge[data-status='nocfg'],
+      :root[data-theme='dark'] .balance-badge[data-status='relay'] {
+        color: #9aa0a8;
+      }
+
+      @keyframes bb-danger-pulse {
         0%,
         100% {
-          box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+          box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.45);
         }
         50% {
-          box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);
+          box-shadow: 0 0 0 5px rgba(248, 81, 73, 0);
+        }
+      }
+
+      @keyframes bb-spin {
+        to {
+          transform: rotate(360deg);
         }
       }
 
       @keyframes bb-blink {
-        0%,
-        100% {
-          opacity: 1;
-        }
         50% {
           opacity: 0.25;
         }
@@ -275,12 +343,12 @@
     <div class="title">DSH Desktop</div>
     <button class="settings-btn" id="settings-btn" title="设置" aria-label="设置">设置</button>
     <button class="help-btn" id="help-btn" title="帮助" aria-label="帮助">帮助</button>
-    <!-- DeepSeek 余额徽章：位于帮助按钮右侧，悬停出明细 tooltip，点击手动刷新 -->
+    <!-- DeepSeek 余额徽章：位于帮助按钮右侧，悬停出明细 tooltip，点击手动刷新。
+         骨架仅为首帧 loading 占位，内容由脚本按状态重建（图标 + 文案） -->
     <div class="bb-wrap" id="bb-wrap">
-      <button class="balance-badge" id="balance-badge" type="button" data-status="loading" aria-label="DeepSeek 余额">
-        <span class="bb-dot" aria-hidden="true"></span>
-        <span class="bb-symbol" aria-hidden="true">¥</span>
-        <span class="bb-amt" id="bb-amt">–––</span>
+      <button class="balance-badge" id="balance-badge" type="button" data-status="loading" aria-label="DeepSeek 余额，点击刷新">
+        <span class="bb-spin" aria-hidden="true"></span>
+        <span class="bb-text">查询中</span>
       </button>
     </div>
     <script>
@@ -414,10 +482,27 @@
       ;(function () {
         var wrap = document.getElementById('bb-wrap')
         var badge = document.getElementById('balance-badge')
-        var amtEl = document.getElementById('bb-amt')
-        if (!wrap || !badge || !amtEl) return
+        if (!wrap || !badge) return
         var lastSnap = null
         var tooltipOpen = false
+
+        // 状态图标（与设计稿 balance-badge-preview.html 的 ICONS 一致）
+        var ICONS = {
+          wallet:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2"/><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18"/><path d="M16 14h2.5"/></svg>',
+          warn:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5M12 18v.5"/></svg>',
+          refresh:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14-5.3L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14 5.3L20 16"/><path d="M20 20v-4h-4"/></svg>',
+          key:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9"/><path d="M17 6l3 3"/></svg>',
+          dash:
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>'
+        }
+
+        function ico(name) {
+          return '<span class="bb-ico" aria-hidden="true">' + ICONS[name] + '</span>'
+        }
 
         // 徽章金额格式化：小于一万显示 39.63（¥ 由独立符号位 .bb-symbol 提供，
         // 渲染成「¥ 39.63」；窄窗口时符号位隐藏只剩数字），大于等于一万显示 1.23万。
@@ -492,14 +577,30 @@
           if (!s) return
           lastSnap = s
           badge.dataset.status = s.status
-          if (s.status === 'ok' || s.status === 'low') {
-            amtEl.textContent = fmtNum(s.cny)
+          // 徽章内容按状态整体重建（对齐设计稿 renderMain）：图标 + 文案；
+          // 动态值仅 fmtNum 输出的数字，无远端文本，无 XSS 面
+          if (s.status === 'ok') {
+            badge.innerHTML =
+              ico('wallet') +
+              '<span class="bb-symbol" aria-hidden="true">¥</span>' +
+              '<span class="bb-amt">' + fmtNum(s.cny) + '</span>'
+          } else if (s.status === 'low') {
+            badge.innerHTML =
+              ico('warn') +
+              '<span class="bb-dot" aria-hidden="true"></span>' +
+              '<span class="bb-text">余额不足 ¥' + fmtNum(s.cny) + '</span>'
+          } else if (s.status === 'auth') {
+            badge.innerHTML = ico('key') + '<span class="bb-text">Key 失效</span>'
+          } else if (s.status === 'nocfg') {
+            badge.innerHTML = ico('key') + '<span class="bb-text">未配置 Key</span>'
+          } else if (s.status === 'net') {
+            badge.innerHTML = ico('refresh') + '<span class="bb-text">获取失败</span>'
           } else if (s.status === 'relay') {
-            amtEl.textContent = '—'
-          } else if (s.status === 'loading') {
-            amtEl.textContent = '–––'
+            badge.innerHTML = ico('dash') + '<span class="bb-text">余额 —</span>'
           } else {
-            amtEl.textContent = '—'
+            // loading（含未知状态兜底）：旋转圈 + 查询中
+            badge.innerHTML =
+              '<span class="bb-spin" aria-hidden="true"></span><span class="bb-text">查询中</span>'
           }
           // tooltip 展开中：面板由主进程注入 DSH 内容页，随快照推送最新内容
           if (tooltipOpen && window.dsh && typeof window.dsh.setBalanceTooltip === 'function') {
@@ -515,9 +616,11 @@
         function openTooltip() {
           if (tooltipOpen) return
           tooltipOpen = true
-          // 面板注入在 DSH 内容页（主进程 balance-tooltip IPC），内容取当前快照
+          // 面板注入在 DSH 内容页（主进程 balance-tooltip IPC），内容取当前快照；
+          // 附带徽章实时 rect，主进程据此把面板水平居中到徽章（徽章宽度随状态变化）
           if (lastSnap && window.dsh && typeof window.dsh.setBalanceTooltip === 'function') {
-            window.dsh.setBalanceTooltip(true, buildTooltip(lastSnap))
+            var r = badge.getBoundingClientRect()
+            window.dsh.setBalanceTooltip(true, buildTooltip(lastSnap), { left: r.left, width: r.width })
           }
         }
 
