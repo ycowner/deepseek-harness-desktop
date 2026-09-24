@@ -25,12 +25,12 @@
 | --- | --- |
 | `DSH-Desktop-Setup-1.0.13.exe` | Windows x64 安装程序，需以管理员权限运行 |
 
-**安装包校验值**（打包后补充）：
+**安装包校验值**（152,274,602 字节）：
 
 | 算法 | 值 |
 | --- | --- |
-| SHA256 | 待补充 |
-| SHA512 (base64) | 待补充 |
+| SHA256 | `3d9f03aed23dbc993c3b85227a3b82d8104c76bd49973d5e2553c5a8afe0b513` |
+| SHA512 (base64) | `MHB+xs1jFPJ6oqg8RbMXWNVOf3gQpQ1IchHRjfeIhK9F2JkXbqofRbxtJ9cGgMt/m24Dtd9Kfzdnqui32XxM7A==` |
 
 > 双击安装包即可从旧版本升级（保留任务栏固定图标）。
 
