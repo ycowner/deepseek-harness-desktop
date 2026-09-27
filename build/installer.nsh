@@ -88,3 +88,33 @@ Var /GLOBAL dshInstallPhase
 !macroend
 
 !endif
+
+; ---- 卸载 / 升级时的文件删除策略 ----
+; 必须在 !ifndef BUILD_UNINSTALLER 之外：本宏只被卸载器 pass 展开
+; （uninstaller.nsh 的 `!ifmacrodef customRemoveFiles`），而 sharedHeader
+; 在安装器与卸载器两个 pass 都会注入（NsisTarget.js 的 executeMakensis 两处调用）。
+;
+; 为什么要替换默认行为：
+; electron-builder 25 的 uninstaller.nsh 在 ${isUpdated} 为真时走 un.atomicRMDir ——
+; 把安装目录内每个文件逐个 Rename 到 $PLUGINSDIR\old-install\ 并为每个目录建镜像，
+; 再 RMDir /r $INSTDIR，退出时删掉整份 TEMP 镜像。本项目的 ${isUpdated} 经上文
+; 方案 B' 重定义后升级时恒为真，因此每次升级都要多付约 5.8 万次文件系统操作
+; （1.0.14 实测 18,888 个文件：18,888 rename + ~10,500 mkdir + 同量级删除）。
+; 更严重的隐患：$PLUGINSDIR 位于系统盘 %TEMP%，而本安装器允许改安装目录，
+; 一旦装到非系统盘，跨卷 Rename 会退化成「整份复制 + 删除」，584MB 白搬两趟。
+;
+; customRemoveFiles 一旦定义，模板的 !else 分支（atomicRMDir + RMDir /r）整体不展开，
+; 所以必须自己补 RMDir /r。这与 electron-builder 在非升级卸载路径上的既有行为一致，
+; 不是自创逻辑；额外的 $INSTDIR 非空守卫比模板默认更严。
+;
+; 失去的保护：默认 atomicRMDir 在文件被占用时会中止并 un.restoreFiles 回滚。
+; 缓解事实：installSection.nsh 在 uninstallOldVersion 之前已执行 CHECK_APP_RUNNING，
+; 且 ${isUpdated} 为真时该宏会主动结束运行中的应用
+; （allowOnlyOneInstallerInstance.nsh 的 doStopProcess 分支），升级场景下不会有
+; DSH Desktop 自身持有文件锁；残留风险仅限第三方进程短暂占用，表现为卸载后留下
+; 个别文件，不影响新版本覆盖安装。
+!macro customRemoveFiles
+  ${if} $INSTDIR != ""
+    RMDir /r "$INSTDIR"
+  ${endif}
+!macroend

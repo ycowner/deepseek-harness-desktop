@@ -321,12 +321,14 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 - 主进程代码 → `dist/` → 打包进 `asar`
 - 运行时资源 → `extraResources`：
   - `node/`（内置 Node + 完整 npm；已排除 corepack / 文档 / 类型声明）
-  - `dsh-bundled/`（预装 DSH 包，已排除 d.ts）
+  - `dsh-bundled/`（预装 DSH 包；已排除类型声明，以及第三方包内的 sourcemap / 文档 / 测试目录 / lint 配置 / node-pty 非 win32-x64 预编译产物，见 §8.2.3）
   - `icon.ico`（窗口图标，主进程通过 `process.resourcesPath/icon.ico` 读取）
 - 安装包：NSIS、`perMachine: true`、`oneClick: false`、`allowToChangeInstallationDirectory: true`
+- 安装载荷：`nsis.useZip: true` + `nsis.differentialPackage: false`，安装时由 `nsisunz::Unzip` 直接解压到安装目录（见 §8.2.1，两者必须同时设置）
+- Chromium 语言包：`win.electronLanguages` 只保留 `zh-CN` / `zh-TW` / `en-US`（默认 55 个 `.pak` / 41MB → 3 个 / 1.5MB）。只影响 Chromium 原生 UI 文案（网页右键菜单、内置错误页），DSH Web UI 自身 i18n 与此无关；`en-US` 是 Electron 兜底语言，不可删。
 - 安装包命名：`DSH-Desktop-Setup-<version>.exe`（`artifactName` 连字符格式，避免上传平台对空格的处理）
 - 发布配置：不再使用 `publish` 段（原 electron-updater 自动更新已移除，不生成 `app-update.yml`）；GitHub Release 是用户手动下载的唯一渠道，每个 release 上传 `DSH-Desktop-Setup-<version>.exe` 即可。
-- 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 146MB。
+- 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 **170MB**（zip 载荷，比 7z 时期的 145MB 大，换来安装耗时从 360s 降到 24s，见 §8.2）。
 
 ### 8.1 任务栏固定图标保留（NSIS 跨升级）
 
@@ -374,6 +376,61 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 1. `npm run package` 全流程能跑通
 2. 生成的安装包能在干净 Windows 上首次启动成功（首次会用到在线修复 / 缓存查找）
 3. 窗口图标（`build/icon.ico`）和打包后 `resources/icon.ico` 同步更新
+
+### 8.2 安装耗时优化（zip 直解 + 产物裁剪 + 跳过 atomicRMDir）
+
+1.0.14 之前全新安装需 **360s**、升级需 **349s**；而同机 `robocopy /MT:1` 复制同一棵落地树只要 24.7s（Defender 实时保护关闭、NVMe SSD），即九成时间耗在安装管线自身而非磁盘 I/O。三处改动后：全新安装 **24.4s**、稳态升级 **34.8s**、卸载 9.5s。
+
+#### 8.2.1 安装载荷：zip 直解（`nsis.useZip` + `nsis.differentialPackage: false`）
+
+electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = false` 是硬编码常量，常规 `nsis` target 必然走「把 win-unpacked 打成单个归档内嵌进安装器」的路径。默认归档是 7z，模板 `extractAppPackage.nsh` 的 `extractUsing7za` 会：
+
+1. `File /oname=$PLUGINSDIR\app-64.7z` —— 归档写到 **%TEMP%**
+2. `Nsis7z::Extract` 解压到 `$PLUGINSDIR\7z-out` —— 全部文件在 %TEMP% 落地一遍
+3. `CopyFiles /SILENT "$PLUGINSDIR\7z-out\*" $OUTDIR` —— 再用 SHFileOperation 单线程复制到安装目录
+4. 安装器退出时 NSIS 清理 `$PLUGINSDIR` —— 把 %TEMP% 那份全删掉
+
+即**同一份产物落盘三趟**（1.0.14 的 18,888 个文件 → 约 5.7 万次文件操作、1.3GB 写盘），且要求 %TEMP% 预留约 750MB。改用 zip 后模板走 `decompress` 的另一分支 `nsisunz::Unzip "$PLUGINSDIR\app-64.zip" "$INSTDIR"`，**直接解压到安装目录**，中转与复制两趟消失。代价是 deflate 压缩率低于 LZMA2，安装包变大（145MB → 170MB，已被 §8.2.3 的裁剪部分抵消）。绑定约束见 §12.1 第 31 条。
+
+`differentialPackage: false` 的副作用：不再生成 `.blockmap`（`latest.yml` 仍生成，但缺 `size` 字段，且自 1.0.3 起无消费方）。
+
+#### 8.2.2 升级 / 卸载：`customRemoveFiles` 跳过 atomicRMDir
+
+`uninstaller.nsh` 在 `${isUpdated}` 为真时调 `un.atomicRMDir`：把安装目录内**每个文件逐个 Rename 到 `$PLUGINSDIR\old-install\`** 并为每个目录建镜像，再 `RMDir /r`，退出时删 %TEMP% 镜像。本项目 §8.1.1 的方案 B' 让 `${isUpdated}` 升级时恒为真，因此每次升级多付约 5.8 万次文件系统操作；更严重的隐患是 `$PLUGINSDIR` 在系统盘 %TEMP%，而安装器允许改安装目录，装到非系统盘时跨卷 `Rename` 会退化成「整份复制 + 删除」。
+
+`build/installer.nsh` 用官方钩子 `customRemoveFiles` 替换为一句 `RMDir /r "$INSTDIR"`。详见 §12.1 第 32 条。该宏与 §8.1.1 的 keep-shortcuts 链路互不干涉：`${ifNot} ${isKeepShortcuts}` 分支在文件删除块之后，未被触碰；实测新安装器仍正确写入 `KeepShortcuts=true` 与 `InstallLocation`，开始菜单 `.lnk` 的 `System.AppUserModel.ID` 仍为 `com.dsh.desktop`。
+
+#### 8.2.3 产物裁剪
+
+| 裁剪项 | 位置 | 省掉 |
+| --- | --- | --- |
+| `*.map` | `dsh-bundled` filter | 4,627 个 |
+| 第三方包 `*.md` | `dsh-bundled` filter | 467 个 |
+| `test/` `tests/` `__tests__/` | `dsh-bundled` filter | 1,243 个 |
+| `.github/`、`.eslintrc*`、`.nycrc*`、`.editorconfig` | `dsh-bundled` filter | 73 个 |
+| node-pty 非 win32-x64 prebuilds | `dsh-bundled` filter | 12 个 / 约 19MB |
+| Chromium 语言包（`win.electronLanguages` 只留 zh-CN / zh-TW / en-US） | Electron 层 | 52 个 / 约 39MB |
+
+落地文件 18,888 → **12,414**，落地体积 543.7MB → **446MB**。两条硬约束见 §12.1 第 33、34 条。
+
+#### 8.2.4 实测数据与验证方法
+
+| 场景 | 1.0.14 基线 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| 全新安装 | 360.3s | **24.4s** | -93.2% |
+| 升级（从 1.0.14 升上来，含旧卸载器 atomicRMDir） | 348.7s | 67.3s | -80.7% |
+| 升级（稳态，新→新） | 348.7s | **34.8s** | -90.0% |
+| 卸载 | — | 9.5s | — |
+| 安装包体积 | 152,276,049 B | 178,697,035 B | +17.4% |
+| 落地文件数 / 体积 | 18,888 / 543.7MB | 12,414 / 446MB | -34.2% / -18.0% |
+
+计时方法：管理员 PowerShell 里用 `Stopwatch` 包住 `Start-Process <Setup.exe> -ArgumentList '/S',"/D=<目标目录>" -Wait -PassThru`；测完调用安装目录内 `Uninstall DSH Desktop.exe /S _?=<目标目录>` 清理（`_?=` 就地运行会留下卸载器自身，属该模式固有行为，控制面板正常卸载不留残留）。
+
+改 `extraResources` filter 后必须重跑的三项裁剪安全性验证：
+
+1. **模块解析差分**：用内置 node 对基线树与裁剪树的每个包分别 `require.resolve`，只允许出现「两边都失败」（1.0.14 实测 486 个包、0 回归、19 个两边都失败属上游既有，如 `@modelcontextprotocol/sdk` 的 exports 指向不存在的 `dist/cjs/index.js`）。
+2. **文件级差分审计**：列出「基线有、裁剪后无」的全部文件并按规则归类，`UNEXPLAINED` 必须为 0；同时「裁剪后新增」必须为 0（非 0 说明豁免 pattern 把本该排除的东西放回来了）。
+3. **真实启动裁剪后的 dsh-bundled**：`<内置 node> resources/dsh-bundled/lib/bin.js web --port <端口> --no-open`，用日志里打出的 `?token=` URL 请求首页应 200，且页面引用的 js/css/favicon 全部 200。
 
 ---
 
@@ -542,10 +599,27 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
     - `show: false` + `ready-to-show` 组合存在**时序竞争**（事件在监听挂载前触发或丢失），窗口将永远停在不可见状态：现象为进程、托盘、DSH 服务全部正常，但屏幕上没有窗口（实测 dev 模式多次复现，本机概率很高，非偶发）。
     - `createWindow()` 内 `ready-to-show` 处理器之后已挂 3s 延迟兜底：未 `isQuitting`、未最小化、未销毁且不可见则强制 `show()` 并打 warn 日志（`[DSH] ready-to-show 未按时触发，已兜底显示窗口`）。删掉它就是把 competition 变成用户可见 bug。
     - 兜底 timer 必须 `unref()`（避免拖住事件循环）；守卫里的 `isMinimized()` 不能省——用户 3s 内手动最小化时兜底不得把窗口再拉出来。
+31. **不要只开 `nsis.useZip` 而不开 `nsis.differentialPackage: false`**。
+    - `NsisTarget.js` 的归档格式判定是 `format = !isBuildDifferentialAware && options.useZip ? "zip" : "7z"`，而 `ZIP_COMPRESSION` 的定义只看 `options.useZip`。两者不同步的后果：实际内嵌的是 7z，模板却走 `nsisunz::Unzip` 去解它 —— 安装必然失败。
+    - 也不要把 `useZip` 单独关掉而留着 `differentialPackage: false`：那会退回 7z 三趟落盘管线（§8.2.1），全新安装从 24s 退回 360s。
+    - 验证方法（不需要真装）：扫安装包二进制的载荷签名，zip 是 `50 4B 03 04`、7z 是 `37 7A BC AF 27 1C`，出现在 NSIS stub 之后（实测偏移约 515,600）。
+32. **不要删掉 `build/installer.nsh` 里的 `customRemoveFiles` 宏**。
+    - 删掉后模板的 `!else` 分支恢复生效：升级时旧卸载器会走 `un.atomicRMDir`，把安装目录内每个文件逐个 `Rename` 到系统盘 %TEMP% 的镜像目录再删，1.0.14 实测约 5.8 万次额外文件系统操作；装到非系统盘时跨卷 Rename 还会退化成整份复制。
+    - 该宏必须写在 `!ifndef BUILD_UNINSTALLER` **之外**：它只被卸载器 pass 展开，而 `sharedHeader`（含本文件）在两个 pass 都会注入。
+    - 模板中 `customRemoveFiles` 一旦定义，`!else` 分支（atomicRMDir **和** `RMDir /r $INSTDIR`）整体不展开，所以宏内必须自己补 `RMDir /r "$INSTDIR"`，漏掉就等于不删文件。
+    - 与 §8.1.1 的 keep-shortcuts 链路互不干涉（`${ifNot} ${isKeepShortcuts}` 分支在文件删除块之后）；改完仍需实机验证任务栏固定图标跨升级保留。
+33. **不要把 `dsh-bundled` 的裁剪 filter 从 `**/node_modules/**` 作用域放开到全局，也不要动末尾的豁免顺序**。
+    - 裁剪规则全部限定在 `**/node_modules/**` 内：DSH 自身只有 `lib/` 下 5 个 `.js` 与根目录 `README.md` / `README.zh.md` / `README.i18n.yaml`，放开作用域会把这些一起删掉（上游 231 个 `README.i18n.yaml` 配合 `dsh-host-plugin-inventory`、`dsh-client-ui-sidebar-documentpreview` 判断，这些 README 很可能被运行时读取）。
+    - filter 语义是「按数组顺序、最后一次匹配生效」（`app-builder-lib/out/util/filter.js` 的 `minimatchAll`：已命中时只再用负向 pattern 复测，未命中时只再用正向 pattern 复测）。因此豁免 pattern `**/node_modules/@deepseek-ai/**` 必须排在所有裁剪规则之后，而 `!**/*.d.ts` / `!**/dist-types/**` 又必须**再声明一次在豁免之后** —— 否则豁免会把类型声明放回包里（实测回流 1,340 个 `.d.ts`）。
+    - 改完必须跑 §8.2.4 的三项验证（模块解析差分 / 文件级差分审计 / 真实启动 dsh-bundled），不能只看 `npm run build` 通过。
+34. **不要给 `extraResources` 加按目录名裁剪的规则（`doc` / `docs` / `man` / `example` / `examples`）**。
+    - 实测踩坑：`yaml` 包把**运行时代码**放在 `dist/doc/` 下（`dist/compose/composer.js` 里 `require('../doc/directives.js')`），加上 `!**/node_modules/**/doc/**` 后 `require('yaml')` 直接 `MODULE_NOT_FOUND`。
+    - 这类规则总共只省 77 个文件（占总裁剪量 1.2%），风险与收益完全不对等。`test` / `tests` / `__tests__` 已实测安全（1,243 个文件、486 个包 0 解析回归），但新增任何目录名规则前都必须重跑差分验证。
 
 ### 12.2 改之前要确认
 
-- 修改 `electron-builder.yml` 的 `extraResources` filter → 会显著影响安装包体积和首次启动行为，必须跑完整 `npm run package` 验证。
+- 修改 `electron-builder.yml` 的 `extraResources` filter → 会显著影响安装包体积、安装耗时和首次启动行为，必须跑完整 `npm run package`，并补齐 §8.2.4 的三项裁剪安全性验证（模块解析差分 / 文件级差分审计 / 真实启动 dsh-bundled）。
+- 修改 `nsis.useZip` / `nsis.differentialPackage` / `build/installer.nsh` 的 `customRemoveFiles` → 直接决定安装耗时（§8.2），改完必须实机计时对比，不能只看构建成功；两者绑定约束见 §12.1 第 31 条。
 - 修改 `dsh-manager.ts` 的 `findCachedDshEntry()` 查找顺序 → 改了顺序会让某些环境找不到 DSH 包。
 - 修改 `tsconfig.json` / `tsconfig.node.json` 的 `lib` / `types` → 三段式各自的类型会受影响，编译可能过不了。
 - 修改渲染层 HTML 的 CSP 头 → 当前 `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'`，DSH Web UI 通过 `loadURL` 加载不受这个 CSP 影响（每个 webContents 独立），但 loading/error 页的 inline 脚本依赖 `'unsafe-inline'`，不要直接删。titlebar.html 额外有 `img-src 'self' data:`（应用图标走 data URL），删掉图标会消失。

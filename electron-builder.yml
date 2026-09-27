@@ -9,7 +9,8 @@ directories:
   app: .
 # 主进程代码打包进 asar，extraResources 中的内容不会被 asar 打包
 asar: true
-# 压缩策略：本地分发优先解压速度，normal 平衡体积与解压速度
+# 压缩策略：作用于 nsis.useZip 生成的 app 载荷 zip（deflate）。
+# deflate 的解压速度与压缩级别基本无关，级别只影响构建耗时与体积，因此这里以体积为先。
 compression: normal
 files:
   - "dist/**/*"
@@ -21,6 +22,14 @@ win:
         - x64
   # 应用以管理员权限运行（解决 DSH 创建符号链接的 EPERM 问题）
   requestedExecutionLevel: requireAdministrator
+  # 只保留这三个 Chromium 语言包（默认 55 个 .pak / 41MB，精简后 3 个 / 1.5MB）。
+  # 影响面仅限 Chromium 原生 UI 文案（网页右键菜单、内置错误页等）；DSH Web UI 自身的
+  # i18n 由前端包处理，与此无关。en-US 是 Electron 的兜底语言，不可删。
+  # 由 ElectronFramework.js 的 removeUnusedLanguagesIfNeeded 在打包前直接删文件，无自定义逻辑。
+  electronLanguages:
+    - zh-CN
+    - zh-TW
+    - en-US
 # 客户端更新：不再使用 electron-updater/Gitee 自动下载安装（自 1.0.3 起），
 # 改为 GitHub releases/latest API 检测新版本后引导用户打开 Release 页面手动下载（见 src/main/app-update.ts）
 nsis:
@@ -30,7 +39,22 @@ nsis:
   # 卸载时不要删除用户 AppData（DSH/npm 缓存等），即使走控制面板主动卸载也保留。
   # 默认即为 false，显式写出来便于维护者理解。
   deleteAppDataOnUninstall: false
-  # 自定义安装/卸载钩子入口。当前为文档与未来扩展点，在本仓库未与默认模板产生差异。
+  # 安装载荷用 zip 而非默认的 7z。模板 extractAppPackage.nsh 的 decompress 分支据此
+  # 改走 nsisunz::Unzip 直接解压到 $INSTDIR；默认 7z 路径（extractUsing7za）是
+  # 「7z 写 %TEMP% → Nsis7z 解压到 %TEMP%\7z-out → CopyFiles 复制到安装目录 →
+  # 退出时删 TEMP 镜像」三趟搬运。1.0.14 实测：18,888 个文件全新安装 360s，
+  # 而同机 robocopy 单线程复制同一棵树只要 24.7s（Defender 实时保护为关闭状态、NVMe SSD），
+  # 即九成时间耗在管线自身而非磁盘 I/O。代价：deflate 压缩率低于 LZMA2，安装包体积变大。
+  useZip: true
+  # 必须与 useZip 同时设置，不能只开 useZip：NsisTarget.js 在 differentialPackage
+  # 未显式关闭时（isBuildDifferentialAware 为真）强制 format=7z，但同一处仍会定义
+  # ZIP_COMPRESSION，结果是安装器用 nsisunz 去解一个 7z，安装必然失败。
+  # 关闭后不再生成 .blockmap（latest.yml 仍会生成，但缺 size 字段）：客户端更新只走
+  # GitHub releases API（src/main/app-update.ts），RELEASE_NOTES.md 也只记录 Setup exe
+  # 的校验值，两者均无消费方。
+  differentialPackage: false
+  # 自定义安装/卸载钩子入口，承载 §8.1.1 的 ${isUpdated} 重定义（任务栏固定图标保留）
+  # 与 customRemoveFiles（升级时跳过 atomicRMDir 逐文件搬运），不是纯文档文件。
   include: "build/installer.nsh"
 # 额外资源：将内置 Node.js 二进制和预安装的 DSH 包打包到应用中
 extraResources:
@@ -63,6 +87,45 @@ extraResources:
       - "!**/*.d.ts"
       - "!**/*.d.cts"
       - "!**/*.d.mts"
+      # ---- 安装提速裁剪：只作用于第三方包，上游 DSH 自家包由末尾的正向 pattern 整体豁免 ----
+      # filter 的匹配语义是「按数组顺序、最后一次匹配生效」（app-builder-lib/out/util/filter.js
+      # 的 minimatchAll：已命中时只再用负向 pattern 复测，未命中时只再用正向 pattern 复测），
+      # 因此豁免规则必须放在所有裁剪规则之后。
+      # sourcemap：Node 运行时忽略 //# sourceMappingURL，缺失只影响 DevTools 符号化
+      - "!**/node_modules/**/*.map"
+      # 第三方包内文档（1.0.14 实测 467 个；@deepseek-ai 自家 README 由下方豁免规则保留）
+      - "!**/node_modules/**/*.md"
+      # 依赖包自带的测试目录（1.0.14 实测 1,243 个文件，@deepseek-ai 各包均无此类目录）
+      - "!**/node_modules/**/test/**"
+      - "!**/node_modules/**/tests/**"
+      - "!**/node_modules/**/__tests__/**"
+      - "!**/node_modules/**/.github/**"
+      # lint / 覆盖率配置
+      - "!**/node_modules/**/.eslintrc*"
+      - "!**/node_modules/**/.nycrc*"
+      - "!**/node_modules/**/.editorconfig"
+      # 目标平台仅 Windows x64：node-pty 其他平台的预编译产物无用（约 19MB）。
+      # 必须保留 prebuilds/win32-x64 —— 那是 node-pty 原生绑定的唯一加载来源。
+      - "!**/node-pty/prebuilds/darwin-*/**"
+      - "!**/node-pty/prebuilds/linux-*/**"
+      - "!**/node-pty/prebuilds/win32-arm64/**"
+      # 豁免上游 DSH 自家包：@deepseek-ai/* 每个包都带 README.md / README.zh.md，
+      # 且 1.0.14 产物里有 231 个 README.i18n.yaml，配合 dsh-host-plugin-inventory、
+      # dsh-client-ui-sidebar-documentpreview 等包判断，这些 README 很可能被运行时读取。
+      # 用一条正向 pattern 整体豁免，使裁剪范围与上游 DSH 版本演进解耦：
+      # 将来 @deepseek-ai/* 新增 test/map 也不会被误删。
+      - "**/node_modules/@deepseek-ai/**"
+      # 上一条豁免是「最后一次匹配生效」，会把上面 .d.ts / dist-types 的排除一并覆盖掉
+      # （实测导致 1,340 个 @deepseek-ai 类型声明文件重新进包），所以必须在豁免之后
+      # 再声明一次：DSH 自家包只豁免本次新增的裁剪规则，类型声明照旧排除。
+      - "!**/dist-types/**"
+      - "!**/*.d.ts"
+      - "!**/*.d.cts"
+      - "!**/*.d.mts"
+      # 注意：不要加 !**/doc/** / !**/docs/** / !**/man/** / !**/example(s)/** 这类
+      # 「按目录名裁剪」的规则。实测 yaml 包把运行时代码放在 dist/doc/ 下
+      # （dist/compose/composer.js 里 require('../doc/directives.js')），删掉即 MODULE_NOT_FOUND。
+      # 这类规则总共只省 77 个文件，风险与收益完全不对等。
   # 窗口图标：打包到 resources/icon.ico，供主进程在运行时读取
   - from: "build/icon.ico"
     to: "icon.ico"
