@@ -2,6 +2,35 @@
 
 ---
 
+# Release Notes — DSH Desktop v1.0.16
+
+## ✨ 新图标
+
+- **客户端换上全新图标**：以 DSH 鲸鱼标志为主体，融合浏览器窗口边框 —— 白色圆角砖 + 黑色单线窗框 + 鲸鱼剪影（去掉原图标中的烧瓶元素）。
+- 图标全链路同步更新：应用窗口、系统托盘、标题栏、安装 / 卸载程序与任务栏快捷方式。已把图标固定到任务栏的用户，升级后图标会在原位刷新为新样式（应用身份不变，不会丢失固定位置）。
+- 图标改为可复现的生成管线：由 `scripts/generate-icon.js` 从源图 `build/icon-src/whale.png` 按设计稿实测几何生成，含 16 / 32 / 48 / 64 / 128 / 256 六个尺寸。
+
+## 📦 安装包
+
+| 文件 | 说明 |
+| --- | --- |
+| `DSH-Desktop-Setup-1.0.16.exe` | Windows x64 安装程序，需以管理员权限运行 |
+
+**安装包校验值**（262,599,877 字节）：
+
+| 算法 | 值 |
+| --- | --- |
+| SHA256 | `82496f1fefa6c8ade50195fdc1b7119486c6236f051442cb42da5dce7c7f550c` |
+| SHA512 (base64) | `yyPNTywxhYt4MDXy3Hl0mueVpAUZLdodYkvqDqLU6Ts+fccvSzbAaMVL0sO0mg2DXeCF0mSO7b888Cc3Hc7WeA==` |
+
+> 出厂预装的 DSH 运行包保持 0.1.7-rc.2 不变。双击安装包即可从旧版本升级（保留任务栏固定图标）。本版本无接口、协议与存储格式变更，配置与数据完全兼容。
+
+## 🐛 反馈
+
+如在使用中遇到问题，欢迎通过 [Issues](https://github.com/ycowner/deepseek-harness-desktop/issues) 反馈。
+
+---
+
 # Release Notes — DSH Desktop v1.0.15
 
 ## ✨ 优化
