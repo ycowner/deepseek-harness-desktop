@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH Desktop — 对话框样式预览</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh;
+    font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;
+    background: #eef0f3; color: #111827;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+  body[data-theme="dark"] { background: #0b1220; color: #f9fafb; }
+  .page { padding: 40px 32px 64px; max-width: 880px; }
+  h1 { margin: 0 0 6px; font-size: 19px; font-weight: 600; }
+  p.sub { margin: 0 0 24px; font-size: 13px; line-height: 1.7; color: #6b7280; }
+  body[data-theme="dark"] p.sub { color: #9ca3af; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 32px;
+    position: sticky; top: 0; z-index: 10; padding: 8px 0;
+    background: #eef0f3;
+  }
+  body[data-theme="dark"] .bar { background: #0b1220; }
+  button.trigger {
+    height: 32px; padding: 0 14px; border-radius: 8px; cursor: pointer;
+    font: inherit; font-size: 13px; font-weight: 500;
+    border: 1px solid rgba(0,0,0,.12); background: #fff; color: #111827;
+  }
+  button.trigger:hover { background: #f9fafb; }
+  body[data-theme="dark"] button.trigger {
+    border-color: rgba(255,255,255,.16); background: #1f2937; color: #f9fafb;
+  }
+  body[data-theme="dark"] button.trigger:hover { background: #273140; }
+  #result {
+    margin-bottom: 28px; padding: 10px 14px; border-radius: 8px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    background: rgba(0,0,0,.05); color: #6b7280; display: inline-block;
+  }
+  body[data-theme="dark"] #result { background: rgba(255,255,255,.06); color: #9ca3af; }
+  .derive {
+    margin: 0 0 20px; padding: 8px 12px; border-radius: 8px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+    background: rgba(22,163,74,.12); color: #15803d;
+    border-left: 3px solid #16a34a;
+  }
+  body[data-theme="dark"] .derive { background: rgba(34,197,94,.14); color: #86efac; }
+
+  /* ── 模拟 DSH 聊天页：玻璃必须有东西可折射，纯色底上判断不出真实观感 ── */
+  .mock { border-radius: 14px; overflow: hidden; border: 1px solid rgba(0,0,0,.08); }
+  body[data-theme="dark"] .mock { border-color: rgba(255,255,255,.1); }
+  .mock-bar {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    background: rgba(255,255,255,.72); border-bottom: 1px solid rgba(0,0,0,.06);
+  }
+  body[data-theme="dark"] .mock-bar {
+    background: rgba(31,41,55,.72); border-bottom-color: rgba(255,255,255,.08);
+  }
+  .mock-dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; }
+  .mock-title { font-size: 12.5px; font-weight: 600; }
+  .mock-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; background: #fff; }
+  body[data-theme="dark"] .mock-body { background: #0f172a; }
+  .bubble { max-width: 78%; padding: 10px 13px; border-radius: 14px; font-size: 13px; line-height: 1.6; }
+  .bubble--me {
+    align-self: flex-end; background: #0369a1; color: #fff; border-bottom-right-radius: 4px;
+  }
+  .bubble--ai {
+    align-self: flex-start; background: #f1f5f9; color: #334155; border-bottom-left-radius: 4px;
+  }
+  body[data-theme="dark"] .bubble--ai { background: #1e293b; color: #cbd5e1; }
+  .mock-art {
+    align-self: flex-start; width: 240px; height: 96px; border-radius: 12px;
+    background: linear-gradient(135deg, #0ea5e9, #6366f1 55%, #ec4899);
+  }
+  .mock-code {
+    align-self: flex-start; padding: 10px 12px; border-radius: 10px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.7;
+    background: #0f172a; color: #a5b4fc;
+  }
+</style>
+</head>
+<body data-theme="light">
+<div class="page">
+  <h1>自绘对话框样式预览</h1>
+  <p class="sub">
+    样式（DIALOG_CSS）、图标与 DOM 结构全部直接取自 <code>src/main/dsh-dialog.ts</code>，
+    点按钮走的就是生产同一条 <code>window.__dshDialogHost.open()</code> 路径。<br>
+    每个 spec 都经**真实的 <code>buildDialogSpec()</code>** 推导 defaultId / primaryId /
+    detailTone——不是手写 variant。<br>
+    Esc = 取消按钮；回车 = 初始焦点按钮；点遮罩 = 取消。
+    下方是模拟的 DSH 聊天页——玻璃需要背后有内容才能判断真实观感。
+  </p>
+  <div id="derive" class="derive"></div>
+  <div class="derive" style="background:rgba(56,189,248,.12);color:#0369a1;border-left-color:#0ea5e9">
+    下面四个按钮走的是**注入式模态框**（injected-modal.ts），与「检查更新…」走的对话框层是两套独立实现。
+  </div>
+  <div class="bar">
+    <button class="trigger" id="theme">切换明暗</button>
+    <button class="trigger" data-open="sample">对话框：风险类 detail</button>
+    <button class="trigger" data-open="meta">对话框：版本信息类</button>
+    <button class="trigger" data-open="failed">对话框：更新失败（3 按钮）</button>
+    <button class="trigger" data-open="picker">对话框：检查更新（4 按钮）</button>
+    <button class="trigger" data-open="quit">对话框回归：退出确认</button>
+    <button class="trigger" data-modal="about">模态框：关于（info 图标）</button>
+    <button class="trigger" data-modal="changelog">模态框：更新日志（含正文替换）</button>
+  </div>
+  <div id="result">尚未做出选择</div>
+
+  <div class="mock">
+    <div class="mock-bar"><span class="mock-dot"></span><span class="mock-title">DSH 会话</span></div>
+    <div class="mock-body">
+      <div class="bubble bubble--me">帮我看下这个更新包为什么装不上</div>
+      <div class="bubble bubble--ai">我先看一下日志。dsh-repair 报的是 npm install 阶段 EPERM，通常是 resources 目录只读导致的。</div>
+      <div class="mock-art"></div>
+      <div class="mock-code">Error: EPERM: operation not permitted, rename 'C:\\Program Files\\dsh-cache'</div>
+      <div class="bubble bubble--me">那要怎么修</div>
+      <div class="bubble bubble--ai">把缓存目录指到 %LOCALAPPDATA% 就行，我已经改好了，重新试一次。</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  if (window.__dshDialogHost) return
+  var CSS = "\n:host { all: initial; }\n* { box-sizing: border-box; }\n.backdrop {\n  position: fixed; inset: 0; z-index: 2147483647;\n  display: flex; align-items: center; justify-content: center; padding: 24px;\n  background: var(--dsh-dlg-backdrop);\n  -webkit-backdrop-filter: blur(6px);\n  backdrop-filter: blur(6px);\n  animation: dlg-fade 140ms ease-out;\n}\n.card {\n  width: min(460px, 100%); max-height: min(76vh, 560px);\n  display: flex; flex-direction: column;\n  background: var(--dsh-dlg-glass);\n  -webkit-backdrop-filter: blur(20px) saturate(180%);\n  backdrop-filter: blur(20px) saturate(180%);\n  border: 1px solid var(--dsh-dlg-glass-border);\n  border-radius: 24px;\n  /* 外阴影托住卡片（脱离页面平面），inset 高光模拟顶部受光 */\n  box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);\n  color: var(--dsh-dlg-body);\n  overflow: hidden;\n  font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;\n  animation: dlg-pop 160ms cubic-bezier(.2, .8, .2, 1);\n}\n.head { display: flex; align-items: flex-start; gap: 10px; padding: 22px 24px 0; }\n.head[hidden] { display: none; }\n.icon { flex: none; width: 18px; height: 18px; margin-top: 1px; color: var(--dsh-dlg-icon-info); }\n.icon[data-type=\"warning\"] { color: var(--dsh-dlg-icon-warning); }\n.icon[data-type=\"error\"] { color: var(--dsh-dlg-icon-error); }\n.title { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.45; color: var(--dsh-dlg-fg); }\n.body { padding: 10px 24px 0; overflow-y: auto; min-height: 0; }\n\n/* ── 三段文字层级：每级各带一个图标，样式互不混淆 ──\n   ① 提示语    13.5px 正文色 + 中性提示符图标\n   ② 风险类    13px 正文色 + 琥珀竖条/淡底 + 警示三角\n   ③ 版本信息  12.5px 次级色 + 淡中性底 + tag 标签\n   ② 与 ③ 的底色都是半透明的，叠在玻璃卡上不会像\"补丁\"。 */\n.tier { display: flex; align-items: flex-start; gap: 9px; }\n.tier__icon { flex: none; width: 16px; height: 16px; margin-top: 2px; }\n.tier__text { min-width: 0; }\n\n.message { font-size: 13.5px; line-height: 1.65; color: var(--dsh-dlg-body); }\n.message .tier__icon { color: var(--dsh-dlg-muted); }\n\n.detail--notice {\n  margin-top: 12px; padding: 10px 12px 10px 11px;\n  border-left: 3px solid var(--dsh-dlg-notice-bar);\n  border-radius: 0 10px 10px 0;\n  background: var(--dsh-dlg-notice-bg);\n  font-size: 13px; line-height: 1.65; color: var(--dsh-dlg-body);\n  white-space: pre-wrap;\n}\n.detail--notice .tier__icon { color: var(--dsh-dlg-icon-warning); }\n\n.detail--meta {\n  margin-top: 10px; padding: 8px 12px;\n  border-radius: 10px;\n  background: var(--dsh-dlg-meta-bg);\n  font-size: 12.5px; line-height: 1.7; color: var(--dsh-dlg-muted);\n  white-space: pre-wrap;\n}\n.detail--meta .tier__icon { color: var(--dsh-dlg-muted); }\n\n.foot {\n  display: flex; justify-content: flex-end; flex-wrap: wrap;\n  gap: 10px; row-gap: 10px; padding: 18px 24px 22px;\n}\n/* 四个中英混排按钮单行放不下时用这个变体：禁止换行 + 更紧的间距，\n   宁可让按钮横向压缩也不能退回\"两行按钮\"的难看排布 */\n.card[data-tight=\"1\"] .foot { flex-wrap: nowrap; gap: 8px; }\n/* 两个及以上按钮时加一条发丝线，把\"内容\"与\"动作\"分层 */\n.card[data-split=\"1\"] .foot { border-top: 1px solid var(--dsh-dlg-hairline); margin-top: 18px; }\n.btn {\n  flex: none; white-space: nowrap;\n  border-radius: 12px; cursor: pointer; border: 1px solid transparent;\n  font-family: inherit; font-weight: 500; line-height: 1;\n  background: transparent; color: var(--dsh-dlg-body);\n  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;\n}\n/* 主按钮：13px / 34px，且 min-width 把它撑成全组最宽——4 按钮时另外三个\n   按钮里有 5 汉字 + 拉丁字母的（如「检查DSH运行包」），纯内容排版下它会比\n   4 汉字的主按钮更宽，\"主按钮最大\"就不成立了 */\n.btn--lead { height: 34px; padding: 0 20px; min-width: 112px; font-size: 13px; background: var(--dsh-dlg-primary-bg); color: var(--dsh-dlg-primary-fg); }\n.btn--lead:hover { background: var(--dsh-dlg-primary-hover); }\n/* 次级操作：描边 + 小一号。描边按钮在玻璃上必须用半透明面，实体色贴上去像补丁 */\n.btn--minor { height: 30px; padding: 0 14px; font-size: 12px; background: var(--dsh-dlg-btn-surface); border-color: var(--dsh-dlg-glass-border); }\n.btn--minor:hover { background: var(--dsh-dlg-btn-surface-hover); }\n.btn--ghost { height: 30px; padding: 0 14px; font-size: 12px; color: var(--dsh-dlg-muted); }\n.btn--ghost:hover { background: var(--dsh-dlg-hover); color: var(--dsh-dlg-body); }\n.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }\n@keyframes dlg-fade { from { opacity: 0; } to { opacity: 1; } }\n@keyframes dlg-pop {\n  from { opacity: 0; transform: translateY(4px) scale(.985); }\n  to { opacity: 1; transform: none; }\n}\n@media (prefers-reduced-motion: reduce) { .backdrop, .card { animation: none; } }\n"
+  var ICONS = {"info":"<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11.2v5\"/><path d=\"M12 7.8h.01\"/>","question":"<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3\"/><path d=\"M12 16.8h.01\"/>","warning":"<path d=\"M12 3.6 21.4 19.4H2.6z\"/><path d=\"M12 9.8v4\"/><path d=\"M12 17h.01\"/>","error":"<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M15 9l-6 6\"/><path d=\"M9 9l6 6\"/>","bullet":"<path d=\"M5 12h9\"/><path d=\"M17.5 12h.01\"/>","notice":"<path d=\"M12 3.6 21.4 19.4H2.6z\"/><path d=\"M12 9.8v4\"/><path d=\"M12 17h.01\"/>","meta":"<path d=\"M3.5 11.2V4.8a1.3 1.3 0 0 1 1.3-1.3h6.4a1.3 1.3 0 0 1 .92.38l8.2 8.2a1.3 1.3 0 0 1 0 1.84l-6.4 6.4a1.3 1.3 0 0 1-1.84 0l-8.2-8.2a1.3 1.3 0 0 1-.38-.92z\"/><path d=\"M7.8 7.8h.01\"/>","doc":"<path d=\"M6.5 3.5h7L18 8v12.5H6.5z\"/><path d=\"M13.5 3.5V8H18\"/><path d=\"M9.2 12.5h5.6\"/><path d=\"M9.2 16h5.6\"/>"}
+
+  function svg (name) {
+    var el = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    el.setAttribute('viewBox', '0 0 24 24')
+    el.setAttribute('fill', 'none')
+    el.setAttribute('stroke', 'currentColor')
+    el.setAttribute('stroke-width', '1.75')
+    el.setAttribute('stroke-linecap', 'round')
+    el.setAttribute('stroke-linejoin', 'round')
+    el.setAttribute('aria-hidden', 'true')
+    el.innerHTML = ICONS[name] || ''
+    return el
+  }
+
+  function open (spec) {
+    // 同一时刻只允许一个对话框，与既有模态框的单一实例策略一致
+    var prev = document.querySelector('[data-dsh-dialog]')
+    if (prev) prev.remove()
+
+    // 令牌随 spec 下发，保证首次渲染就是当前主题（不依赖页面里是否注入过横幅/模态框）
+    var vars = spec.vars || {}
+    for (var k in vars) document.documentElement.style.setProperty(k, vars[k])
+
+    var hostEl = document.createElement('div')
+    hostEl.setAttribute('data-dsh-dialog', '')
+    hostEl.style.cssText = 'position:fixed;inset:0;z-index:2147483647;'
+
+    var root = hostEl.attachShadow({ mode: 'open' })
+    var style = document.createElement('style')
+    style.textContent = CSS
+
+    var backdrop = document.createElement('div')
+    backdrop.className = 'backdrop'
+
+    var card = document.createElement('div')
+    card.className = 'card'
+    card.setAttribute('role', 'dialog')
+    card.setAttribute('aria-modal', 'true')
+    if (spec.buttons.length > 1) card.setAttribute('data-split', '1')
+    // 四按钮且总宽接近卡片上限时切紧凑排布：禁止换行 + 更紧间距，
+    // 宁可让按钮横向压缩也不能退化成"两行按钮"
+    if (spec.tight) card.setAttribute('data-tight', '1')
+
+    var head = document.createElement('div')
+    head.className = 'head'
+    if (spec.title) {
+      var titleId = 'dsh-dlg-title-' + spec.id
+      card.setAttribute('aria-labelledby', titleId)
+      if (spec.type && spec.type !== 'none') {
+        var icon = svg(spec.type)
+        icon.setAttribute('class', 'icon')
+        icon.setAttribute('data-type', spec.type)
+        head.appendChild(icon)
+      }
+      var h1 = document.createElement('h1')
+      h1.className = 'title'
+      h1.id = titleId
+      h1.textContent = spec.title
+      head.appendChild(h1)
+    } else {
+      head.setAttribute('hidden', '')
+    }
+
+    var body = document.createElement('div')
+    body.className = 'body'
+
+    // 三段文字层级，每段一个图标。tier() 统一产出「图标 + 文本」的行结构，
+    // 图标形状由 data-icon 指向 ICONS 的键。
+    function tier (kind, tone, iconName, text) {
+      var row = document.createElement('div')
+      row.className = 'tier ' + kind
+      var icon = svg(iconName)
+      icon.setAttribute('class', 'tier__icon')
+      var textEl = document.createElement('div')
+      textEl.className = 'tier__text'
+      textEl.textContent = text
+      row.appendChild(icon)
+      row.appendChild(textEl)
+      return row
+    }
+
+    // ① 提示语：中性提示符，视觉重量刻意低于标题图标
+    body.appendChild(tier('message', '', 'bullet', spec.message))
+    // ②③ detail：风险类提示条 / 版本信息类，按 detailTone 二选一
+    if (spec.detail) {
+      var isNotice = spec.detailTone === 'notice'
+      body.appendChild(tier(
+        isNotice ? 'detail--notice' : 'detail--meta',
+        spec.detailTone,
+        isNotice ? 'notice' : 'meta',
+        spec.detail
+      ))
+    }
+
+    var foot = document.createElement('div')
+    foot.className = 'foot'
+    var btnEls = []
+    spec.buttons.forEach(function (b, i) {
+      var btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'btn btn--' + b.variant
+      btn.textContent = b.label
+      btn.addEventListener('click', function () { settle(i) })
+      foot.appendChild(btn)
+      btnEls.push(btn)
+    })
+
+    card.appendChild(head)
+    card.appendChild(body)
+    card.appendChild(foot)
+    backdrop.appendChild(card)
+    root.appendChild(style)
+    root.appendChild(backdrop)
+
+    var settled = false
+    function settle (index) {
+      if (settled) return
+      settled = true
+      document.removeEventListener('keydown', onKey, true)
+      hostEl.remove()
+      var api = window.dsh
+      if (api && typeof api.dialogResult === 'function') api.dialogResult(spec.id, index)
+    }
+
+    // Esc 走 cancelId；Tab 在按钮之间闭环（模态必须锁住焦点）
+    function onKey (e) {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        settle(spec.cancelId)
+        return
+      }
+      if (e.key !== 'Tab' || !btnEls.length) return
+      var first = btnEls[0]
+      var last = btnEls[btnEls.length - 1]
+      var current = root.activeElement
+      if (e.shiftKey && (current === first || !current)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && current === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    // 全部构建完成再挂载：中途抛错不会留下半截遮罩
+    var mount = document.body || document.documentElement
+    mount.appendChild(hostEl)
+    document.addEventListener('keydown', onKey, true)
+    // 点击遮罩关闭（与既有模态框一致）
+    backdrop.addEventListener('click', function (e) {
+      if (e.target === backdrop) settle(spec.cancelId)
+    })
+    // 初始焦点给 defaultId（与原生一致：回车即触发它）
+    if (btnEls[spec.defaultId]) btnEls[spec.defaultId].focus()
+  }
+
+  window.__dshDialogHost = { open: open }
+})()
+</script>
+<script>
+var VARS = {"light":{"--dsh-modal-bg":"#ffffff","--dsh-modal-text":"#374151","--dsh-modal-heading":"#111827","--dsh-modal-subtext":"#374151","--dsh-modal-muted":"#6b7280","--dsh-modal-border":"#e5e7eb","--dsh-modal-hover":"#f3f4f6","--dsh-modal-code-bg":"#f3f4f6","--dsh-modal-link":"#2563eb","--dsh-banner-btn-bg":"#ffffff","--dsh-accent":"#0369a1","--dsh-dlg-glass":"rgba(255, 255, 255, 0.72)","--dsh-dlg-glass-strong":"rgba(255, 255, 255, 0.82)","--dsh-dlg-glass-border":"rgba(255, 255, 255, 0.85)","--dsh-dlg-highlight":"rgba(255, 255, 255, 0.9)","--dsh-dlg-fg":"#111827","--dsh-dlg-body":"#374151","--dsh-dlg-muted":"#5b6570","--dsh-dlg-hairline":"rgba(17, 24, 39, 0.08)","--dsh-dlg-hover":"rgba(17, 24, 39, 0.06)","--dsh-dlg-btn-surface":"rgba(255, 255, 255, 0.55)","--dsh-dlg-btn-surface-hover":"rgba(255, 255, 255, 0.9)","--dsh-dlg-notice-bar":"rgba(180, 83, 9, 0.55)","--dsh-dlg-notice-bg":"rgba(217, 119, 6, 0.08)","--dsh-dlg-meta-bg":"rgba(17, 24, 39, 0.04)","--dsh-dlg-code-bg":"rgba(17, 24, 39, 0.06)","--dsh-dlg-link":"#0369a1","--dsh-dlg-primary-bg":"#0369a1","--dsh-dlg-primary-fg":"#ffffff","--dsh-dlg-primary-hover":"#075985","--dsh-dlg-ring":"rgba(3, 105, 161, 0.28)","--dsh-dlg-backdrop":"rgba(17, 24, 39, 0.35)","--dsh-dlg-shadow":"0 32px 64px -16px rgba(16, 24, 40, 0.34), 0 8px 16px -8px rgba(16, 24, 40, 0.16)","--dsh-dlg-icon-info":"#0369a1","--dsh-dlg-icon-warning":"#b45309","--dsh-dlg-icon-error":"#b42318"},"dark":{"--dsh-modal-bg":"#1f2937","--dsh-modal-text":"#d1d5db","--dsh-modal-heading":"#f9fafb","--dsh-modal-subtext":"#d1d5db","--dsh-modal-muted":"#9ca3af","--dsh-modal-border":"#374151","--dsh-modal-hover":"#374151","--dsh-modal-code-bg":"#111827","--dsh-modal-link":"#60a5fa","--dsh-banner-btn-bg":"#ffffff","--dsh-accent":"#7dd3fc","--dsh-dlg-glass":"rgba(31, 41, 55, 0.72)","--dsh-dlg-glass-strong":"rgba(31, 41, 55, 0.82)","--dsh-dlg-glass-border":"rgba(255, 255, 255, 0.14)","--dsh-dlg-highlight":"rgba(255, 255, 255, 0.1)","--dsh-dlg-fg":"#f9fafb","--dsh-dlg-body":"#d1d5db","--dsh-dlg-muted":"#9ca3af","--dsh-dlg-hairline":"rgba(255, 255, 255, 0.1)","--dsh-dlg-hover":"rgba(255, 255, 255, 0.08)","--dsh-dlg-btn-surface":"rgba(255, 255, 255, 0.08)","--dsh-dlg-btn-surface-hover":"rgba(255, 255, 255, 0.16)","--dsh-dlg-notice-bar":"rgba(251, 191, 36, 0.55)","--dsh-dlg-notice-bg":"rgba(251, 191, 36, 0.1)","--dsh-dlg-meta-bg":"rgba(255, 255, 255, 0.06)","--dsh-dlg-code-bg":"rgba(0, 0, 0, 0.28)","--dsh-dlg-link":"#7dd3fc","--dsh-dlg-primary-bg":"#7dd3fc","--dsh-dlg-primary-fg":"#0b1220","--dsh-dlg-primary-hover":"#bae6fd","--dsh-dlg-ring":"rgba(125, 211, 252, 0.35)","--dsh-dlg-backdrop":"rgba(0, 0, 0, 0.5)","--dsh-dlg-shadow":"0 32px 64px -16px rgba(0, 0, 0, 0.7), 0 8px 16px -8px rgba(0, 0, 0, 0.45)","--dsh-dlg-icon-info":"#7dd3fc","--dsh-dlg-icon-warning":"#fbbf24","--dsh-dlg-icon-error":"#f87171"}};
+var SPECS = {"sample":{"id":6,"type":"question","title":"更新 DSH 运行包","message":"DSH 运行包有更新 v0.1.7-rc.2 → v0.2.0-rc.2","detail":"更新过程中 DSH 服务会停止，下载并安装新运行包后自动重启。当前进行中的会话会中断。","detailTone":"notice","buttons":[{"label":"确定更新","variant":"lead"},{"label":"取消","variant":"ghost"}],"defaultId":1,"cancelId":1,"tight":false,"vars":{},"label":"样板：更新运行包（风险类 detail）"},"meta":{"id":7,"type":"info","title":"发现新版本","message":"DSH 运行包有新版本可用","detail":"当前版本: v0.1.7-rc.2\n最新版本: v0.2.0-rc.2\n\n顶部蓝色横幅已显示，点击横幅中的「更新 DSH」即可执行更新。","detailTone":"meta","buttons":[{"label":"确定","variant":"lead"}],"defaultId":0,"cancelId":0,"tight":false,"vars":{},"label":"版本信息类 detail"},"failed":{"id":8,"type":"warning","title":"更新未完成","message":"DSH Desktop 客户端更新包下载失败","detail":"连接被重置\n\n可重试下载；若源站持续不可用，也可用浏览器直接下载安装包自行安装。","detailTone":"notice","buttons":[{"label":"重试下载","variant":"lead"},{"label":"浏览器下载","variant":"minor"},{"label":"取消","variant":"ghost"}],"defaultId":0,"cancelId":2,"tight":false,"vars":{},"label":"确认：更新失败（3 按钮）"},"picker":{"id":9,"type":"question","title":"检查更新","message":"请选择要检查的项目","detail":"","detailTone":"meta","buttons":[{"label":"全部检查","variant":"lead"},{"label":"检查DSH运行包","variant":"minor"},{"label":"检查客户端","variant":"minor"},{"label":"取消","variant":"ghost"}],"defaultId":0,"cancelId":3,"tight":true,"vars":{},"label":"选择：检查更新（4 按钮同行）"},"quit":{"id":10,"type":"question","title":"退出确认","message":"确定要退出 DSH Desktop 吗？","detail":"","detailTone":"meta","buttons":[{"label":"退出","variant":"lead"},{"label":"取消","variant":"ghost"}],"defaultId":1,"cancelId":1,"tight":false,"vars":{},"label":"回归：退出确认（焦点必须在取消）"}};
+var MODAL_SCRIPTS = {"about":"\n    (function () {\n      // 清理旧模态框（跨多次注入保持单一实例）\n      if (window.__dshModal) { try { window.__dshModal.cleanup() } catch (e) {} }\n      var prev = document.querySelector('[data-dsh-modal]')\n      if (prev) prev.remove()\n\n      // 注入时按当前生效主题写入令牌，不依赖\"之前是否有人注入过\"\n      var vars = {\"--dsh-modal-bg\":\"#ffffff\",\"--dsh-modal-text\":\"#374151\",\"--dsh-modal-heading\":\"#111827\",\"--dsh-modal-subtext\":\"#374151\",\"--dsh-modal-muted\":\"#6b7280\",\"--dsh-modal-border\":\"#e5e7eb\",\"--dsh-modal-hover\":\"#f3f4f6\",\"--dsh-modal-code-bg\":\"#f3f4f6\",\"--dsh-modal-link\":\"#2563eb\",\"--dsh-banner-btn-bg\":\"#ffffff\",\"--dsh-accent\":\"#0369a1\",\"--dsh-dlg-glass\":\"rgba(255, 255, 255, 0.72)\",\"--dsh-dlg-glass-strong\":\"rgba(255, 255, 255, 0.82)\",\"--dsh-dlg-glass-border\":\"rgba(255, 255, 255, 0.85)\",\"--dsh-dlg-highlight\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-fg\":\"#111827\",\"--dsh-dlg-body\":\"#374151\",\"--dsh-dlg-muted\":\"#5b6570\",\"--dsh-dlg-hairline\":\"rgba(17, 24, 39, 0.08)\",\"--dsh-dlg-hover\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-btn-surface\":\"rgba(255, 255, 255, 0.55)\",\"--dsh-dlg-btn-surface-hover\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-notice-bar\":\"rgba(180, 83, 9, 0.55)\",\"--dsh-dlg-notice-bg\":\"rgba(217, 119, 6, 0.08)\",\"--dsh-dlg-meta-bg\":\"rgba(17, 24, 39, 0.04)\",\"--dsh-dlg-code-bg\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-link\":\"#0369a1\",\"--dsh-dlg-primary-bg\":\"#0369a1\",\"--dsh-dlg-primary-fg\":\"#ffffff\",\"--dsh-dlg-primary-hover\":\"#075985\",\"--dsh-dlg-ring\":\"rgba(3, 105, 161, 0.28)\",\"--dsh-dlg-backdrop\":\"rgba(17, 24, 39, 0.35)\",\"--dsh-dlg-shadow\":\"0 32px 64px -16px rgba(16, 24, 40, 0.34), 0 8px 16px -8px rgba(16, 24, 40, 0.16)\",\"--dsh-dlg-icon-info\":\"#0369a1\",\"--dsh-dlg-icon-warning\":\"#b45309\",\"--dsh-dlg-icon-error\":\"#b42318\"}\n      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])\n\n      var ICONS = {\"info\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M12 11.2v5\\\"/><path d=\\\"M12 7.8h.01\\\"/>\",\"question\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3\\\"/><path d=\\\"M12 16.8h.01\\\"/>\",\"warning\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"error\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M15 9l-6 6\\\"/><path d=\\\"M9 9l6 6\\\"/>\",\"bullet\":\"<path d=\\\"M5 12h9\\\"/><path d=\\\"M17.5 12h.01\\\"/>\",\"notice\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"meta\":\"<path d=\\\"M3.5 11.2V4.8a1.3 1.3 0 0 1 1.3-1.3h6.4a1.3 1.3 0 0 1 .92.38l8.2 8.2a1.3 1.3 0 0 1 0 1.84l-6.4 6.4a1.3 1.3 0 0 1-1.84 0l-8.2-8.2a1.3 1.3 0 0 1-.38-.92z\\\"/><path d=\\\"M7.8 7.8h.01\\\"/>\",\"doc\":\"<path d=\\\"M6.5 3.5h7L18 8v12.5H6.5z\\\"/><path d=\\\"M13.5 3.5V8H18\\\"/><path d=\\\"M9.2 12.5h5.6\\\"/><path d=\\\"M9.2 16h5.6\\\"/>\"}\n      function icon (name, cls) {\n        var el = document.createElementNS('http://www.w3.org/2000/svg', 'svg')\n        el.setAttribute('viewBox', '0 0 24 24')\n        el.setAttribute('fill', 'none')\n        el.setAttribute('stroke', 'currentColor')\n        el.setAttribute('stroke-width', '1.75')\n        el.setAttribute('stroke-linecap', 'round')\n        el.setAttribute('stroke-linejoin', 'round')\n        el.setAttribute('aria-hidden', 'true')\n        el.setAttribute('class', cls)\n        el.setAttribute('data-kind', \"info\")\n        el.innerHTML = ICONS[name] || ''\n        return el\n      }\n\n      var hostEl = document.createElement('div')\n      hostEl.setAttribute('data-dsh-modal', '')\n      // display:block 显式写出：:host { all: initial } 会把 display 重置为 inline\n      // （fixed 定位虽会块化，但不该依赖这个细节）\n      hostEl.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:block;'\n\n      var root = hostEl.attachShadow({ mode: 'open' })\n      var style = document.createElement('style')\n      style.textContent = \"\\n:host { all: initial; }\\n* { box-sizing: border-box; }\\n.backdrop {\\n  position: fixed; inset: 0; z-index: 2147483647;\\n  display: flex; align-items: center; justify-content: center; padding: 24px;\\n  background: var(--dsh-dlg-backdrop);\\n  -webkit-backdrop-filter: blur(4px);\\n  backdrop-filter: blur(4px);\\n  animation: dsh-modal-fade 140ms ease-out;\\n}\\n.card {\\n  position: relative;\\n  width: min(720px, 92vw); max-height: 80vh;\\n  display: flex; flex-direction: column;\\n  background: var(--dsh-dlg-glass-strong);\\n  -webkit-backdrop-filter: blur(12px) saturate(180%);\\n  backdrop-filter: blur(12px) saturate(180%);\\n  border: 1px solid var(--dsh-dlg-glass-border);\\n  border-radius: 24px;\\n  box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);\\n  color: var(--dsh-dlg-body);\\n  overflow: hidden;\\n  font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;\\n  animation: dsh-modal-pop 160ms cubic-bezier(.2, .8, .2, 1);\\n}\\n.head {\\n  display: flex; align-items: center; gap: 10px;\\n  padding: 16px 20px 16px 24px; flex: none;\\n  border-bottom: 1px solid var(--dsh-dlg-hairline);\\n}\\n.head-icon { flex: none; width: 18px; height: 18px; color: var(--dsh-dlg-muted); }\\n.head-icon[data-kind=\\\"info\\\"] { color: var(--dsh-dlg-icon-info); }\\n.head-title { font-size: 15px; font-weight: 600; color: var(--dsh-dlg-fg); }\\n.close {\\n  width: 28px; height: 28px; margin-left: auto;\\n  border: 1px solid transparent; border-radius: 8px;\\n  background: transparent; color: var(--dsh-dlg-muted);\\n  font-size: 18px; line-height: 1; cursor: pointer;\\n}\\n.close:hover { background: var(--dsh-dlg-hover); color: var(--dsh-dlg-fg); }\\n.close:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }\\n.body { padding: 18px 24px 22px; overflow-y: auto; min-height: 0; font-size: 13px; line-height: 1.65; }\\n.body h3 { font-size: 15px; margin: 14px 0 6px; color: var(--dsh-dlg-fg); }\\n.body h4 { font-size: 14px; margin: 12px 0 5px; color: var(--dsh-dlg-fg); }\\n.body h5 { font-size: 13px; margin: 10px 0 4px; color: var(--dsh-dlg-body); }\\n.body p { margin: 6px 0; }\\n.body ul { margin: 6px 0; padding-left: 22px; }\\n.body li { margin: 3px 0; }\\n.body pre {\\n  background: var(--dsh-dlg-code-bg); border-radius: 10px;\\n  padding: 10px 12px; overflow-x: auto; margin: 8px 0; font-size: 12px;\\n}\\n.body code {\\n  background: var(--dsh-dlg-code-bg); border-radius: 5px; padding: 1px 5px;\\n  font-family: ui-monospace, Consolas, monospace; font-size: 12px;\\n}\\n.body pre code { background: transparent; padding: 0; }\\n.body a { color: var(--dsh-dlg-link); }\\n.body hr { border: none; border-top: 1px solid var(--dsh-dlg-hairline); margin: 12px 0; }\\n.body .log-entry { margin: 0 0 14px; }\\n.body .log-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }\\n.body .log-ver { font-size: 14px; font-weight: 600; color: var(--dsh-dlg-fg); }\\n.body .log-date { font-size: 12px; color: var(--dsh-dlg-muted); }\\n.body .log-divider { border: none; border-top: 1px solid var(--dsh-dlg-hairline); margin: 0 0 14px; }\\n@keyframes dsh-modal-fade { from { opacity: 0; } to { opacity: 1; } }\\n@keyframes dsh-modal-pop {\\n  from { opacity: 0; transform: translateY(4px) scale(.985); }\\n  to { opacity: 1; transform: none; }\\n}\\n@media (prefers-reduced-motion: reduce) { .backdrop, .card { animation: none; } }\\n\"\n\n      var backdrop = document.createElement('div')\n      backdrop.className = 'backdrop'\n\n      var card = document.createElement('div')\n      card.className = 'card'\n      card.setAttribute('role', 'dialog')\n      card.setAttribute('aria-modal', 'true')\n      card.setAttribute('aria-labelledby', 'dsh-modal-title')\n\n      var head = document.createElement('div')\n      head.className = 'head'\n      // 头部类型图标：与对话框层对齐，扫一眼就能区分信息 / 文档\n      head.appendChild(icon(\"info\", 'head-icon'))\n      var titleEl = document.createElement('span')\n      titleEl.className = 'head-title'\n      titleEl.id = 'dsh-modal-title'\n      titleEl.textContent = \"关于 DSH Desktop\"\n      var closeBtn = document.createElement('button')\n      closeBtn.className = 'close'\n      closeBtn.setAttribute('aria-label', '关闭')\n      closeBtn.textContent = '×'\n      head.appendChild(titleEl)\n      head.appendChild(closeBtn)\n\n      var body = document.createElement('div')\n      body.className = 'body'\n      body.setAttribute('data-dsh-modal-body', '')\n      body.innerHTML = \"\\n  <div style=\\\"display:flex;flex-direction:column;gap:10px;min-width:320px\\\">\\n    <div style=\\\"font-size:16px;font-weight:600;color:var(--dsh-dlg-fg)\\\">DSH Desktop</div>\\n    <div style=\\\"display:flex;flex-direction:column;gap:6px;font-size:13px\\\">\\n      <div><span style=\\\"color:var(--dsh-dlg-muted)\\\">客户端版本：</span><strong>v1.0.17</strong></div>\\n      <div><span style=\\\"color:var(--dsh-dlg-muted)\\\">DSH 运行包版本：</span><strong>v0.1.7-rc.2</strong></div>\\n      <div><span style=\\\"color:var(--dsh-dlg-muted)\\\">内置 Node 运行时：</span><strong>v24.21.0（ABI 137）</strong></div>\\n    </div>\\n    <div style=\\\"margin-top:6px\\\">\\n      <button class=\\\"about-repo\\\" style=\\\"display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:12px;background:var(--dsh-dlg-primary-bg);color:var(--dsh-dlg-primary-fg);border:1px solid transparent;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;\\\">GitHub 仓库</button>\\n    </div>\\n  </div>\\n\"\n\n      // 模态框内 fragment 锚点导航委托：更新日志的 [中文](#cn-...) 目录链接\n      // 命中后拦截默认行为（防止整个 DSH 页面被 fragment 导航），改为在内容区\n      // 滚动到目标标题。目标也在 shadow root 内，必须用 root.getElementById\n      body.addEventListener('click', function (e) {\n        var el = e.target\n        while (el && el.nodeType === 1 && el.tagName !== 'A') el = el.parentNode\n        if (!el || el.nodeType !== 1) return\n        var href = el.getAttribute('href') || ''\n        if (href.charAt(0) !== '#') return\n        e.preventDefault()\n        var target = root.getElementById(href.slice(1))\n        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })\n      })\n\n      card.appendChild(head)\n      card.appendChild(body)\n      // ★ card 必须在 backdrop 内部：backdrop 才是负责 flex 居中的容器。\n      //   若与 backdrop 平级，卡片会顶到左上角，且被 backdrop 的 z-index +\n      //   半透明 + backdrop-filter 盖住，内容会糊成一片。\n      backdrop.appendChild(card)\n      root.appendChild(style)\n      root.appendChild(backdrop)\n\n      // 全部构建完成再挂载：中途抛错不会留下半截遮罩\n      ;(document.body || document.documentElement).appendChild(hostEl)\n\n      function cleanup() {\n        hostEl.remove()\n        document.removeEventListener('keydown', onKey, true)\n        window.__dshModal = null\n      }\n      function onKey(e) {\n        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup() }\n      }\n      document.addEventListener('keydown', onKey, true)\n      closeBtn.addEventListener('click', cleanup)\n      backdrop.addEventListener('click', function (e) {\n        if (e.target === backdrop) cleanup()\n      })\n\n      // 外部唯一的入口：updateModalBody 与关于框的 GitHub 按钮绑定都走这里\n      window.__dshModal = {\n        shadow: root,\n        update: function (html) { body.innerHTML = html },\n        cleanup: cleanup\n      }\n    })()\n  ","changelog":"\n    (function () {\n      // 清理旧模态框（跨多次注入保持单一实例）\n      if (window.__dshModal) { try { window.__dshModal.cleanup() } catch (e) {} }\n      var prev = document.querySelector('[data-dsh-modal]')\n      if (prev) prev.remove()\n\n      // 注入时按当前生效主题写入令牌，不依赖\"之前是否有人注入过\"\n      var vars = {\"--dsh-modal-bg\":\"#ffffff\",\"--dsh-modal-text\":\"#374151\",\"--dsh-modal-heading\":\"#111827\",\"--dsh-modal-subtext\":\"#374151\",\"--dsh-modal-muted\":\"#6b7280\",\"--dsh-modal-border\":\"#e5e7eb\",\"--dsh-modal-hover\":\"#f3f4f6\",\"--dsh-modal-code-bg\":\"#f3f4f6\",\"--dsh-modal-link\":\"#2563eb\",\"--dsh-banner-btn-bg\":\"#ffffff\",\"--dsh-accent\":\"#0369a1\",\"--dsh-dlg-glass\":\"rgba(255, 255, 255, 0.72)\",\"--dsh-dlg-glass-strong\":\"rgba(255, 255, 255, 0.82)\",\"--dsh-dlg-glass-border\":\"rgba(255, 255, 255, 0.85)\",\"--dsh-dlg-highlight\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-fg\":\"#111827\",\"--dsh-dlg-body\":\"#374151\",\"--dsh-dlg-muted\":\"#5b6570\",\"--dsh-dlg-hairline\":\"rgba(17, 24, 39, 0.08)\",\"--dsh-dlg-hover\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-btn-surface\":\"rgba(255, 255, 255, 0.55)\",\"--dsh-dlg-btn-surface-hover\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-notice-bar\":\"rgba(180, 83, 9, 0.55)\",\"--dsh-dlg-notice-bg\":\"rgba(217, 119, 6, 0.08)\",\"--dsh-dlg-meta-bg\":\"rgba(17, 24, 39, 0.04)\",\"--dsh-dlg-code-bg\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-link\":\"#0369a1\",\"--dsh-dlg-primary-bg\":\"#0369a1\",\"--dsh-dlg-primary-fg\":\"#ffffff\",\"--dsh-dlg-primary-hover\":\"#075985\",\"--dsh-dlg-ring\":\"rgba(3, 105, 161, 0.28)\",\"--dsh-dlg-backdrop\":\"rgba(17, 24, 39, 0.35)\",\"--dsh-dlg-shadow\":\"0 32px 64px -16px rgba(16, 24, 40, 0.34), 0 8px 16px -8px rgba(16, 24, 40, 0.16)\",\"--dsh-dlg-icon-info\":\"#0369a1\",\"--dsh-dlg-icon-warning\":\"#b45309\",\"--dsh-dlg-icon-error\":\"#b42318\"}\n      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])\n\n      var ICONS = {\"info\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M12 11.2v5\\\"/><path d=\\\"M12 7.8h.01\\\"/>\",\"question\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3\\\"/><path d=\\\"M12 16.8h.01\\\"/>\",\"warning\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"error\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M15 9l-6 6\\\"/><path d=\\\"M9 9l6 6\\\"/>\",\"bullet\":\"<path d=\\\"M5 12h9\\\"/><path d=\\\"M17.5 12h.01\\\"/>\",\"notice\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"meta\":\"<path d=\\\"M3.5 11.2V4.8a1.3 1.3 0 0 1 1.3-1.3h6.4a1.3 1.3 0 0 1 .92.38l8.2 8.2a1.3 1.3 0 0 1 0 1.84l-6.4 6.4a1.3 1.3 0 0 1-1.84 0l-8.2-8.2a1.3 1.3 0 0 1-.38-.92z\\\"/><path d=\\\"M7.8 7.8h.01\\\"/>\",\"doc\":\"<path d=\\\"M6.5 3.5h7L18 8v12.5H6.5z\\\"/><path d=\\\"M13.5 3.5V8H18\\\"/><path d=\\\"M9.2 12.5h5.6\\\"/><path d=\\\"M9.2 16h5.6\\\"/>\"}\n      function icon (name, cls) {\n        var el = document.createElementNS('http://www.w3.org/2000/svg', 'svg')\n        el.setAttribute('viewBox', '0 0 24 24')\n        el.setAttribute('fill', 'none')\n        el.setAttribute('stroke', 'currentColor')\n        el.setAttribute('stroke-width', '1.75')\n        el.setAttribute('stroke-linecap', 'round')\n        el.setAttribute('stroke-linejoin', 'round')\n        el.setAttribute('aria-hidden', 'true')\n        el.setAttribute('class', cls)\n        el.setAttribute('data-kind', \"doc\")\n        el.innerHTML = ICONS[name] || ''\n        return el\n      }\n\n      var hostEl = document.createElement('div')\n      hostEl.setAttribute('data-dsh-modal', '')\n      // display:block 显式写出：:host { all: initial } 会把 display 重置为 inline\n      // （fixed 定位虽会块化，但不该依赖这个细节）\n      hostEl.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:block;'\n\n      var root = hostEl.attachShadow({ mode: 'open' })\n      var style = document.createElement('style')\n      style.textContent = \"\\n:host { all: initial; }\\n* { box-sizing: border-box; }\\n.backdrop {\\n  position: fixed; inset: 0; z-index: 2147483647;\\n  display: flex; align-items: center; justify-content: center; padding: 24px;\\n  background: var(--dsh-dlg-backdrop);\\n  -webkit-backdrop-filter: blur(4px);\\n  backdrop-filter: blur(4px);\\n  animation: dsh-modal-fade 140ms ease-out;\\n}\\n.card {\\n  position: relative;\\n  width: min(720px, 92vw); max-height: 80vh;\\n  display: flex; flex-direction: column;\\n  background: var(--dsh-dlg-glass-strong);\\n  -webkit-backdrop-filter: blur(12px) saturate(180%);\\n  backdrop-filter: blur(12px) saturate(180%);\\n  border: 1px solid var(--dsh-dlg-glass-border);\\n  border-radius: 24px;\\n  box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);\\n  color: var(--dsh-dlg-body);\\n  overflow: hidden;\\n  font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;\\n  animation: dsh-modal-pop 160ms cubic-bezier(.2, .8, .2, 1);\\n}\\n.head {\\n  display: flex; align-items: center; gap: 10px;\\n  padding: 16px 20px 16px 24px; flex: none;\\n  border-bottom: 1px solid var(--dsh-dlg-hairline);\\n}\\n.head-icon { flex: none; width: 18px; height: 18px; color: var(--dsh-dlg-muted); }\\n.head-icon[data-kind=\\\"info\\\"] { color: var(--dsh-dlg-icon-info); }\\n.head-title { font-size: 15px; font-weight: 600; color: var(--dsh-dlg-fg); }\\n.close {\\n  width: 28px; height: 28px; margin-left: auto;\\n  border: 1px solid transparent; border-radius: 8px;\\n  background: transparent; color: var(--dsh-dlg-muted);\\n  font-size: 18px; line-height: 1; cursor: pointer;\\n}\\n.close:hover { background: var(--dsh-dlg-hover); color: var(--dsh-dlg-fg); }\\n.close:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }\\n.body { padding: 18px 24px 22px; overflow-y: auto; min-height: 0; font-size: 13px; line-height: 1.65; }\\n.body h3 { font-size: 15px; margin: 14px 0 6px; color: var(--dsh-dlg-fg); }\\n.body h4 { font-size: 14px; margin: 12px 0 5px; color: var(--dsh-dlg-fg); }\\n.body h5 { font-size: 13px; margin: 10px 0 4px; color: var(--dsh-dlg-body); }\\n.body p { margin: 6px 0; }\\n.body ul { margin: 6px 0; padding-left: 22px; }\\n.body li { margin: 3px 0; }\\n.body pre {\\n  background: var(--dsh-dlg-code-bg); border-radius: 10px;\\n  padding: 10px 12px; overflow-x: auto; margin: 8px 0; font-size: 12px;\\n}\\n.body code {\\n  background: var(--dsh-dlg-code-bg); border-radius: 5px; padding: 1px 5px;\\n  font-family: ui-monospace, Consolas, monospace; font-size: 12px;\\n}\\n.body pre code { background: transparent; padding: 0; }\\n.body a { color: var(--dsh-dlg-link); }\\n.body hr { border: none; border-top: 1px solid var(--dsh-dlg-hairline); margin: 12px 0; }\\n.body .log-entry { margin: 0 0 14px; }\\n.body .log-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }\\n.body .log-ver { font-size: 14px; font-weight: 600; color: var(--dsh-dlg-fg); }\\n.body .log-date { font-size: 12px; color: var(--dsh-dlg-muted); }\\n.body .log-divider { border: none; border-top: 1px solid var(--dsh-dlg-hairline); margin: 0 0 14px; }\\n@keyframes dsh-modal-fade { from { opacity: 0; } to { opacity: 1; } }\\n@keyframes dsh-modal-pop {\\n  from { opacity: 0; transform: translateY(4px) scale(.985); }\\n  to { opacity: 1; transform: none; }\\n}\\n@media (prefers-reduced-motion: reduce) { .backdrop, .card { animation: none; } }\\n\"\n\n      var backdrop = document.createElement('div')\n      backdrop.className = 'backdrop'\n\n      var card = document.createElement('div')\n      card.className = 'card'\n      card.setAttribute('role', 'dialog')\n      card.setAttribute('aria-modal', 'true')\n      card.setAttribute('aria-labelledby', 'dsh-modal-title')\n\n      var head = document.createElement('div')\n      head.className = 'head'\n      // 头部类型图标：与对话框层对齐，扫一眼就能区分信息 / 文档\n      head.appendChild(icon(\"doc\", 'head-icon'))\n      var titleEl = document.createElement('span')\n      titleEl.className = 'head-title'\n      titleEl.id = 'dsh-modal-title'\n      titleEl.textContent = \"DSH 运行包更新日志\"\n      var closeBtn = document.createElement('button')\n      closeBtn.className = 'close'\n      closeBtn.setAttribute('aria-label', '关闭')\n      closeBtn.textContent = '×'\n      head.appendChild(titleEl)\n      head.appendChild(closeBtn)\n\n      var body = document.createElement('div')\n      body.className = 'body'\n      body.setAttribute('data-dsh-modal-body', '')\n      body.innerHTML = \"<p style=\\\"color:var(--dsh-dlg-muted)\\\">正在加载更新日志，请稍候...</p>\"\n\n      // 模态框内 fragment 锚点导航委托：更新日志的 [中文](#cn-...) 目录链接\n      // 命中后拦截默认行为（防止整个 DSH 页面被 fragment 导航），改为在内容区\n      // 滚动到目标标题。目标也在 shadow root 内，必须用 root.getElementById\n      body.addEventListener('click', function (e) {\n        var el = e.target\n        while (el && el.nodeType === 1 && el.tagName !== 'A') el = el.parentNode\n        if (!el || el.nodeType !== 1) return\n        var href = el.getAttribute('href') || ''\n        if (href.charAt(0) !== '#') return\n        e.preventDefault()\n        var target = root.getElementById(href.slice(1))\n        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })\n      })\n\n      card.appendChild(head)\n      card.appendChild(body)\n      // ★ card 必须在 backdrop 内部：backdrop 才是负责 flex 居中的容器。\n      //   若与 backdrop 平级，卡片会顶到左上角，且被 backdrop 的 z-index +\n      //   半透明 + backdrop-filter 盖住，内容会糊成一片。\n      backdrop.appendChild(card)\n      root.appendChild(style)\n      root.appendChild(backdrop)\n\n      // 全部构建完成再挂载：中途抛错不会留下半截遮罩\n      ;(document.body || document.documentElement).appendChild(hostEl)\n\n      function cleanup() {\n        hostEl.remove()\n        document.removeEventListener('keydown', onKey, true)\n        window.__dshModal = null\n      }\n      function onKey(e) {\n        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cleanup() }\n      }\n      document.addEventListener('keydown', onKey, true)\n      closeBtn.addEventListener('click', cleanup)\n      backdrop.addEventListener('click', function (e) {\n        if (e.target === backdrop) cleanup()\n      })\n\n      // 外部唯一的入口：updateModalBody 与关于框的 GitHub 按钮绑定都走这里\n      window.__dshModal = {\n        shadow: root,\n        update: function (html) { body.innerHTML = html },\n        cleanup: cleanup\n      }\n    })()\n  ","changelogBody":"\n    (function () {\n      if (!window.__dshModal) return 'no-modal'\n      window.__dshModal.update(\"\\n  <div class=\\\"log-entry\\\">\\n    <div class=\\\"log-head\\\"><span class=\\\"log-ver\\\">v0.2.0-rc.2</span><span class=\\\"log-date\\\">2026-09-29</span></div>\\n    <p><a href=\\\"#cn\\\">中文</a> | <a href=\\\"#en\\\">English</a></p>\\n    <h3 id=\\\"cn\\\">新增功能</h3>\\n    <ul>\\n      <li>桌面端可在菜单栏管理和安装 <code>dsh</code> 命令，支持理插件，无需另装 Node 或 pnpm。</li>\\n      <li>修复新建终端菜单重复出现同名 shell 的问题。</li>\\n    </ul>\\n    <h4>问题修复</h4>\\n    <ul>\\n      <li>修复设置页关闭「显示代码工作视图」后无法调整 Agent 预设的限制。</li>\\n      <li>修复持久 PowerShell 在完成状态后带有空格时无法正确判断命令结束的问题。</li>\\n    </ul>\\n    <h5>安装包</h5>\\n    <pre><code>| DSH-Desktop-Setup-1.0.17.exe | Windows x64 安装程序 |</code></pre>\\n  </div>\\n  <hr class=\\\"log-divider\\\">\\n  <div class=\\\"log-entry\\\">\\n    <div class=\\\"log-head\\\"><span class=\\\"log-ver\\\">v0.1.7-rc.2</span><span class=\\\"log-date\\\">2026-09-20</span></div>\\n    <h3>问题修复</h3>\\n    <ul>\\n      <li>修复从图形入口启动桌面端时缺少登录 shell 环境的问题。</li>\\n    </ul>\\n  </div>\\n  <p style=\\\"color:var(--dsh-dlg-muted);font-size:12px;margin-top:4px\\\">数据来自 GitHub Releases</p>\\n\")\n      return 'updated'\n    })()\n  "};
+var result = document.getElementById('result');
+document.getElementById('derive').textContent = "派生自检通过：5 个用例 × defaultId/primaryId/detailTone/tight ｜ 模态框结构自检通过：append 层级 / 锚点查询 / 对外入口 / 正文替换 / 玻璃参数";
+
+function vars () {
+  var v = VARS[document.body.dataset.theme] || VARS.light, o = {}
+  for (var k in v) o[k] = v[k]
+  return o
+}
+
+// 注入脚本在生成时按 light 主题写了令牌，这里按预览当前主题覆盖回去
+function applyVars () {
+  var v = vars()
+  for (var k in v) document.documentElement.style.setProperty(k, v[k])
+}
+
+// 页面侧 open() 会调 window.dsh.dialogResult；预览环境没有 preload，打桩记录选择结果
+window.dsh = {
+  dialogResult: function (id, index) {
+    result.textContent = 'dialogResult(id=' + id + ', index=' + index + ')'
+  }
+}
+
+function openSpec (key) {
+  try {
+    var spec = JSON.parse(JSON.stringify(SPECS[key]))
+    spec.vars = vars()
+    spec.id = Date.now()
+    window.__dshDialogHost.open(spec)
+  } catch (e) {
+    // 预览页是开发工具：把失败原因直接显示出来，不要静默吞掉
+    result.textContent = 'openSpec(' + key + ') 失败：' + (e && e.stack ? e.stack : e)
+    result.style.background = 'rgba(220,38,38,.12)'
+    result.style.color = '#b42318'
+  }
+}
+
+// 模态框：eval 的就是真机注入的那段 buildModalHostScript 产物
+function openModal (key) {
+  try {
+    applyVars()
+    ;(0, eval)(MODAL_SCRIPTS[key])
+    applyVars()
+    result.textContent = '已打开模态框：' + key
+    // 覆盖「先弹壳 → 数据到达 → 替换正文」这条最容易静默失效的链路
+    if (key === 'changelog') {
+      setTimeout(function () {
+        try {
+          ;(0, eval)(MODAL_SCRIPTS.changelogBody)
+          result.textContent = '已打开模态框：changelog（600ms 后正文已替换）'
+        } catch (e2) {
+          result.textContent = 'updateModalBody 失败：' + (e2 && e2.message ? e2.message : e2)
+        }
+      }, 600)
+    }
+  } catch (e) {
+    result.textContent = 'openModal(' + key + ') 失败：' + (e && e.stack ? e.stack : e)
+    result.style.background = 'rgba(220,38,38,.12)'
+    result.style.color = '#b42318'
+  }
+}
+
+document.querySelectorAll('[data-open]').forEach(function (b) {
+  b.addEventListener('click', function () { openSpec(b.getAttribute('data-open')) })
+})
+document.querySelectorAll('[data-modal]').forEach(function (b) {
+  b.addEventListener('click', function () { openModal(b.getAttribute('data-modal')) })
+})
+document.getElementById('theme').addEventListener('click', function () {
+  document.body.dataset.theme = document.body.dataset.theme === 'dark' ? 'light' : 'dark'
+})
+
+// hash 深链：#sample / #meta / #failed / #picker / #quit / #modal-about /
+// #modal-changelog 直接打开对应形态；任意形态加 -dark 后缀则先切深色主题
+// （#modal-changelog-dark）。同文档片段导航不会重新执行脚本，所以从 A 形态切到
+// B 形态需要手动刷新（或加 ?v=N 强制重载）。
+try {
+  var hash = (location.hash || '').replace('#', '')
+  if (/-dark$/.test(hash)) {
+    document.body.dataset.theme = 'dark'
+    hash = hash.replace(/-dark$/, '')
+  }
+  if (SPECS[hash]) openSpec(hash)
+  else if (hash === 'modal-about') openModal('about')
+  else if (hash === 'modal-changelog') openModal('changelog')
+} catch (e) {
+  document.getElementById('derive').textContent = '深链打开失败：' + (e && e.message ? e.message : e)
+}
+</script>
+</body>
+</html>

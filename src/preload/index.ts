@@ -19,6 +19,35 @@ interface ThemeInfo {
   effective: 'dark' | 'light'
 }
 
+/**
+ * 标题栏更新按钮状态（与主进程 TitlebarUpdateState 结构一致）
+ */
+interface TitlebarUpdateState {
+  client: {
+    /** 是否点亮「更新」按钮（除 idle 外全部为 true） */
+    show: boolean
+    version: string | null
+    /** auto-updater 状态机阶段：idle/available/downloading/downloaded/error */
+    phase: string
+    /** 下载进度 0-100，仅 downloading 阶段有意义 */
+    percent: number
+    /** 已下载字节数，仅 downloading 阶段有意义 */
+    transferred: number
+    /** 资源总字节数，未知时为 0 */
+    total: number
+    /** 当前速率（字节/秒，未知时为 0） */
+    bytesPerSecond: number
+    /** 下载是否已停滞。停滞时 DSH 页进度横幅可能已降级，标题栏是唯一进度载体 */
+    stalled: boolean
+    error: string | null
+    installOnNextLaunch: boolean
+  }
+  dsh: {
+    show: boolean
+    version: string | null
+  }
+}
+
 // 首屏无闪烁：preload 在 document_start 时机执行（早于页面渲染），同步取生效主题并立即
 // 给 <html> 打 data-theme 标。主/内容视图的每个页面（含 DSH 页）都加载同一 preload，
 // 天然获得首屏正确主题。document_start 时 documentElement 可能尚未就绪，
@@ -79,13 +108,23 @@ const api = {
   getAppVersion: (): Promise<string> => {
     return ipcRenderer.invoke('get-app-version')
   },
-  // 触发客户端更新引导（主进程弹出确认框后打开 GitHub Release 页面，由用户手动下载安装）
-  installUpdate: (): void => {
-    ipcRenderer.send('install-update')
+  // 读取标题栏更新按钮的当前状态（首帧用）。
+  // 真源在主进程（auto-updater 快照 + DSH 待更新版本），此处只透传只读快照。
+  // 不可信调用方返回 null，页面侧按「无更新」处理。
+  getTitlebarUpdateState: (): Promise<TitlebarUpdateState | null> => {
+    return ipcRenderer.invoke('get-titlebar-update-state')
   },
-  // 触发 DSH 运行包更新（主进程切回 loading 页后下载安装并重启服务）
-  installDshUpdate: (): void => {
-    ipcRenderer.send('install-dsh-update')
+  // 订阅标题栏更新按钮状态变化（下载完成 / 失败 / DSH 运行包检出新版时推送）
+  onTitlebarUpdateState: (callback: (state: TitlebarUpdateState) => void): void => {
+    ipcRenderer.on('titlebar-update-state', (_event, state: TitlebarUpdateState) => callback(state))
+  },
+  // 点击标题栏「更新」按钮（DSH Desktop 客户端），主进程弹安装时机确认框
+  clientUpdateClicked: (): void => {
+    ipcRenderer.send('titlebar-client-update')
+  },
+  // 点击标题栏「更新DSH」按钮（DSH 运行包），主进程弹版本确认框
+  dshUpdateClicked: (): void => {
+    ipcRenderer.send('titlebar-dsh-update')
   },
   // 在系统默认浏览器中打开外部链接（DSH UI 中的 GitHub 图标使用）
   // 返回 openExternal 结果：成功时 success 为 true，失败时包含 error 信息
@@ -141,6 +180,30 @@ const api = {
   // 方案导致内容区黑屏，已废弃）
   setBalanceTooltip: (open: boolean, html?: string, anchor?: { left: number; width: number }): void => {
     ipcRenderer.send('balance-tooltip', open, html, anchor)
+  },
+  // 自绘对话框（dsh-dialog 注入在内容视图内）的按钮回传。
+  // id 用于主进程丢弃过期点击（对话框已关闭或页面已导航），index 为按钮下标。
+  // 注入脚本运行在页面主世界，能拿到本 preload 经 contextBridge 暴露的 window.dsh
+  dialogResult: (id: number, index: number): void => {
+    ipcRenderer.send('dsh-dialog-response', id, index)
+  },
+  // 公告横幅的「× 关闭」回传已读。横幅由主进程注入内容页（notice-banner.ts），
+  // 在页面主世界运行，可直接拿到本 preload 暴露的 window.dsh。
+  // id 在主进程按白名单正则校验，非法值只记日志不落盘。
+  noticeRead: (id: string): void => {
+    ipcRenderer.send('notice-read', id)
+  },
+  // 读取公告摘要（标题栏铃铛）：未读条数 + 是否存在未读横幅
+  getNoticeState: (): Promise<{ unread: number; hasBanner: boolean }> => {
+    return ipcRenderer.invoke('get-notice-state')
+  },
+  // 订阅公告摘要推送（未读数变化时驱动铃铛红点，如用户关掉一条横幅后）
+  onNoticeState: (callback: (state: { unread: number; hasBanner: boolean }) => void): void => {
+    ipcRenderer.on('notice-state', (_event, state: { unread: number; hasBanner: boolean }) => callback(state))
+  },
+  // 点标题栏铃铛：立即拉一次并展示未读公告
+  noticeRefresh: (): void => {
+    ipcRenderer.send('notice-refresh')
   }
 }
 

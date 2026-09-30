@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DSH Desktop — 公告横幅预览</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh;
+    font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;
+    background: #eef0f3; color: #111827;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+  body[data-theme="dark"] { background: #0b1220; color: #f9fafb; }
+  .page { padding: 24px 32px 64px; }
+  h1 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+  p.sub { margin: 0 0 20px; font-size: 13px; line-height: 1.7; color: #6b7280; }
+  body[data-theme="dark"] p.sub { color: #9ca3af; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  button.trigger {
+    height: 32px; padding: 0 14px; border-radius: 8px; cursor: pointer;
+    font: inherit; font-size: 13px; font-weight: 500;
+    border: 1px solid rgba(0,0,0,.12); background: #fff; color: #111827;
+  }
+  button.trigger:hover { background: #f9fafb; }
+  body[data-theme="dark"] button.trigger { border-color: rgba(255,255,255,.16); background: #1f2937; color: #f9fafb; }
+  .reports { margin-bottom: 20px; display: flex; flex-direction: column; gap: 6px; }
+  .report {
+    padding: 8px 12px; border-radius: 8px; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px;
+    background: rgba(22,163,74,.12); color: #15803d; border-left: 3px solid #16a34a;
+  }
+  /* 模拟客户端更新横幅（#dsh-ub），用来验证两条横幅的错开 */
+  #fake-ub {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2147483000;
+    padding: 10px 16px 12px; font-size: 13px;
+    background: var(--dsh-modal-bg); border-bottom: 1px solid var(--dsh-modal-border);
+  }
+  #fake-ub[hidden] { display: none; }
+  .mock { border-radius: 14px; overflow: hidden; border: 1px solid rgba(0,0,0,.08); background: #fff; }
+  body[data-theme="dark"] .mock { border-color: rgba(255,255,255,.1); background: #0f172a; }
+  .mock-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: rgba(0,0,0,.03); }
+  body[data-theme="dark"] .mock-bar { background: rgba(255,255,255,.04); }
+  .mock-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .bubble { max-width: 78%; padding: 10px 13px; border-radius: 14px; font-size: 13px; line-height: 1.6; }
+  .bubble--me { align-self: flex-end; background: #0369a1; color: #fff; border-bottom-right-radius: 4px; }
+  .bubble--ai { align-self: flex-start; background: #f1f5f9; color: #334155; border-bottom-left-radius: 4px; }
+  body[data-theme="dark"] .bubble--ai { background: #1e293b; color: #cbd5e1; }
+  .mock-code { align-self: flex-start; padding: 10px 12px; border-radius: 10px; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; background: #0f172a; color: #a5b4fc; }
+</style>
+</head>
+<body data-theme="light">
+<div id="fake-ub" hidden>正在下载客户端更新包 42%</div>
+<div class="page">
+  <h1>公告横幅预览</h1>
+  <p class="sub">
+    样式与注入脚本全部取自 <code>src/main/notice-banner.ts</code>；三条自检在生成预览时已跑过（见下方绿条）。<br>
+    点「叠加更新横幅」可以验证公告横幅与客户端更新横幅（<code>#dsh-ub</code>）的错开——公告会在它下面，不重叠。
+  </p>
+  <div class="reports">
+    <div class="report">公告校验自检通过：12 类非法输入全部被拒 / 1 类合法输入通过</div>
+    <div class="report">展示决策自检通过：严重度排序 / 3 条截断 / 已读过滤 / 生效窗口</div>
+    <div class="report">横幅注入自检通过：textContent 渲染 / innerHTML 仅图标 / 外链走 open-external / 关闭回传已读</div>
+  </div>
+  <div class="bar">
+    <button class="trigger" id="theme">切换明暗</button>
+    <button class="trigger" id="show">显示公告横幅（3 条堆叠）</button>
+    <button class="trigger" id="toggle-ub">叠加更新横幅</button>
+  </div>
+  <div class="mock">
+    <div class="mock-bar">DSH 会话</div>
+    <div class="mock-body">
+      <div class="bubble bubble--me">看下今晚的维护公告</div>
+      <div class="bubble bubble--ai">维护窗口是 02:00–04:00，期间会话会中断，其它不受影响。</div>
+      <div class="mock-code">Error: 401 Unauthorized — API key invalid</div>
+    </div>
+  </div>
+</div>
+
+<script>
+var VARS = {"light":{"--dsh-modal-bg":"#ffffff","--dsh-modal-text":"#374151","--dsh-modal-heading":"#111827","--dsh-modal-subtext":"#374151","--dsh-modal-muted":"#6b7280","--dsh-modal-border":"#e5e7eb","--dsh-modal-hover":"#f3f4f6","--dsh-modal-code-bg":"#f3f4f6","--dsh-modal-link":"#2563eb","--dsh-banner-btn-bg":"#ffffff","--dsh-accent":"#0369a1","--dsh-dlg-glass":"rgba(255, 255, 255, 0.72)","--dsh-dlg-glass-strong":"rgba(255, 255, 255, 0.82)","--dsh-dlg-glass-border":"rgba(255, 255, 255, 0.85)","--dsh-dlg-highlight":"rgba(255, 255, 255, 0.9)","--dsh-dlg-fg":"#111827","--dsh-dlg-body":"#374151","--dsh-dlg-muted":"#5b6570","--dsh-dlg-hairline":"rgba(17, 24, 39, 0.08)","--dsh-dlg-hover":"rgba(17, 24, 39, 0.06)","--dsh-dlg-btn-surface":"rgba(255, 255, 255, 0.55)","--dsh-dlg-btn-surface-hover":"rgba(255, 255, 255, 0.9)","--dsh-dlg-notice-bar":"rgba(180, 83, 9, 0.55)","--dsh-dlg-notice-bg":"rgba(217, 119, 6, 0.08)","--dsh-dlg-meta-bg":"rgba(17, 24, 39, 0.04)","--dsh-dlg-code-bg":"rgba(17, 24, 39, 0.06)","--dsh-dlg-link":"#0369a1","--dsh-dlg-primary-bg":"#0369a1","--dsh-dlg-primary-fg":"#ffffff","--dsh-dlg-primary-hover":"#075985","--dsh-dlg-ring":"rgba(3, 105, 161, 0.28)","--dsh-dlg-backdrop":"rgba(17, 24, 39, 0.35)","--dsh-dlg-shadow":"0 32px 64px -16px rgba(16, 24, 40, 0.34), 0 8px 16px -8px rgba(16, 24, 40, 0.16)","--dsh-dlg-icon-info":"#0369a1","--dsh-dlg-icon-warning":"#b45309","--dsh-dlg-icon-error":"#b42318"},"dark":{"--dsh-modal-bg":"#1f2937","--dsh-modal-text":"#d1d5db","--dsh-modal-heading":"#f9fafb","--dsh-modal-subtext":"#d1d5db","--dsh-modal-muted":"#9ca3af","--dsh-modal-border":"#374151","--dsh-modal-hover":"#374151","--dsh-modal-code-bg":"#111827","--dsh-modal-link":"#60a5fa","--dsh-banner-btn-bg":"#ffffff","--dsh-accent":"#7dd3fc","--dsh-dlg-glass":"rgba(31, 41, 55, 0.72)","--dsh-dlg-glass-strong":"rgba(31, 41, 55, 0.82)","--dsh-dlg-glass-border":"rgba(255, 255, 255, 0.14)","--dsh-dlg-highlight":"rgba(255, 255, 255, 0.1)","--dsh-dlg-fg":"#f9fafb","--dsh-dlg-body":"#d1d5db","--dsh-dlg-muted":"#9ca3af","--dsh-dlg-hairline":"rgba(255, 255, 255, 0.1)","--dsh-dlg-hover":"rgba(255, 255, 255, 0.08)","--dsh-dlg-btn-surface":"rgba(255, 255, 255, 0.08)","--dsh-dlg-btn-surface-hover":"rgba(255, 255, 255, 0.16)","--dsh-dlg-notice-bar":"rgba(251, 191, 36, 0.55)","--dsh-dlg-notice-bg":"rgba(251, 191, 36, 0.1)","--dsh-dlg-meta-bg":"rgba(255, 255, 255, 0.06)","--dsh-dlg-code-bg":"rgba(0, 0, 0, 0.28)","--dsh-dlg-link":"#7dd3fc","--dsh-dlg-primary-bg":"#7dd3fc","--dsh-dlg-primary-fg":"#0b1220","--dsh-dlg-primary-hover":"#bae6fd","--dsh-dlg-ring":"rgba(125, 211, 252, 0.35)","--dsh-dlg-backdrop":"rgba(0, 0, 0, 0.5)","--dsh-dlg-shadow":"0 32px 64px -16px rgba(0, 0, 0, 0.7), 0 8px 16px -8px rgba(0, 0, 0, 0.45)","--dsh-dlg-icon-info":"#7dd3fc","--dsh-dlg-icon-warning":"#fbbf24","--dsh-dlg-icon-error":"#f87171"}};
+var BANNER_SCRIPT = "\n    (function () {\n      var NOTICES = [{\"id\":\"n-warn\",\"type\":\"banner\",\"level\":\"warning\",\"title\":\"今晚 02:00–04:00 服务维护\",\"body\":\"维护期间 DSH 服务会短暂不可用，正在进行的会话会中断。\",\"link\":{\"label\":\"查看详情\",\"url\":\"https://example.com/maint\"},\"dismissible\":true},{\"id\":\"n-err\",\"type\":\"banner\",\"level\":\"error\",\"title\":\"API Key 已失效\",\"body\":\"检测到 DeepSeek API Key 返回 401，请在设置中重新配置。未配置前无法使用对话功能。\",\"dismissible\":true},{\"id\":\"n-lock\",\"type\":\"banner\",\"level\":\"info\",\"title\":\"客户端 1.0.17 已发布\",\"body\":\"本次更新修复了…\\n并新增了公告功能。\",\"dismissible\":false}]\n      var LEVEL_ICON = {\"info\":\"info\",\"warning\":\"warning\",\"error\":\"error\"}\n      var ICONS = {\"info\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M12 11.2v5\\\"/><path d=\\\"M12 7.8h.01\\\"/>\",\"question\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3\\\"/><path d=\\\"M12 16.8h.01\\\"/>\",\"warning\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"error\":\"<circle cx=\\\"12\\\" cy=\\\"12\\\" r=\\\"9\\\"/><path d=\\\"M15 9l-6 6\\\"/><path d=\\\"M9 9l6 6\\\"/>\",\"bullet\":\"<path d=\\\"M5 12h9\\\"/><path d=\\\"M17.5 12h.01\\\"/>\",\"notice\":\"<path d=\\\"M12 3.6 21.4 19.4H2.6z\\\"/><path d=\\\"M12 9.8v4\\\"/><path d=\\\"M12 17h.01\\\"/>\",\"meta\":\"<path d=\\\"M3.5 11.2V4.8a1.3 1.3 0 0 1 1.3-1.3h6.4a1.3 1.3 0 0 1 .92.38l8.2 8.2a1.3 1.3 0 0 1 0 1.84l-6.4 6.4a1.3 1.3 0 0 1-1.84 0l-8.2-8.2a1.3 1.3 0 0 1-.38-.92z\\\"/><path d=\\\"M7.8 7.8h.01\\\"/>\",\"doc\":\"<path d=\\\"M6.5 3.5h7L18 8v12.5H6.5z\\\"/><path d=\\\"M13.5 3.5V8H18\\\"/><path d=\\\"M9.2 12.5h5.6\\\"/><path d=\\\"M9.2 16h5.6\\\"/>\"}\n      var vars = {\"--dsh-modal-bg\":\"#ffffff\",\"--dsh-modal-text\":\"#374151\",\"--dsh-modal-heading\":\"#111827\",\"--dsh-modal-subtext\":\"#374151\",\"--dsh-modal-muted\":\"#6b7280\",\"--dsh-modal-border\":\"#e5e7eb\",\"--dsh-modal-hover\":\"#f3f4f6\",\"--dsh-modal-code-bg\":\"#f3f4f6\",\"--dsh-modal-link\":\"#2563eb\",\"--dsh-banner-btn-bg\":\"#ffffff\",\"--dsh-accent\":\"#0369a1\",\"--dsh-dlg-glass\":\"rgba(255, 255, 255, 0.72)\",\"--dsh-dlg-glass-strong\":\"rgba(255, 255, 255, 0.82)\",\"--dsh-dlg-glass-border\":\"rgba(255, 255, 255, 0.85)\",\"--dsh-dlg-highlight\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-fg\":\"#111827\",\"--dsh-dlg-body\":\"#374151\",\"--dsh-dlg-muted\":\"#5b6570\",\"--dsh-dlg-hairline\":\"rgba(17, 24, 39, 0.08)\",\"--dsh-dlg-hover\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-btn-surface\":\"rgba(255, 255, 255, 0.55)\",\"--dsh-dlg-btn-surface-hover\":\"rgba(255, 255, 255, 0.9)\",\"--dsh-dlg-notice-bar\":\"rgba(180, 83, 9, 0.55)\",\"--dsh-dlg-notice-bg\":\"rgba(217, 119, 6, 0.08)\",\"--dsh-dlg-meta-bg\":\"rgba(17, 24, 39, 0.04)\",\"--dsh-dlg-code-bg\":\"rgba(17, 24, 39, 0.06)\",\"--dsh-dlg-link\":\"#0369a1\",\"--dsh-dlg-primary-bg\":\"#0369a1\",\"--dsh-dlg-primary-fg\":\"#ffffff\",\"--dsh-dlg-primary-hover\":\"#075985\",\"--dsh-dlg-ring\":\"rgba(3, 105, 161, 0.28)\",\"--dsh-dlg-backdrop\":\"rgba(17, 24, 39, 0.35)\",\"--dsh-dlg-shadow\":\"0 32px 64px -16px rgba(16, 24, 40, 0.34), 0 8px 16px -8px rgba(16, 24, 40, 0.16)\",\"--dsh-dlg-icon-info\":\"#0369a1\",\"--dsh-dlg-icon-warning\":\"#b45309\",\"--dsh-dlg-icon-error\":\"#b42318\"}\n      for (var k in vars) document.documentElement.style.setProperty(k, vars[k])\n\n      // 幂等重建：dshView 每次导航后节点都会随文档消失，这里保证始终只有一个\n      var prev = document.querySelector('[data-dsh-notice]')\n      if (prev) prev.remove()\n      if (!NOTICES.length) return\n\n      function icon (name) {\n        var el = document.createElementNS('http://www.w3.org/2000/svg', 'svg')\n        el.setAttribute('viewBox', '0 0 24 24')\n        el.setAttribute('fill', 'none')\n        el.setAttribute('stroke', 'currentColor')\n        el.setAttribute('stroke-width', '1.75')\n        el.setAttribute('stroke-linecap', 'round')\n        el.setAttribute('stroke-linejoin', 'round')\n        el.setAttribute('aria-hidden', 'true')\n        el.setAttribute('class', 'n-icon')\n        // 图标路径是主进程注入的常量，不是远端内容\n        el.innerHTML = ICONS[name] || ''\n        return el\n      }\n\n      // 与客户端更新横幅（#dsh-ub）错开：它可见时公告横幅下移。\n      // 直接读它的实际布局，两套注入无需共享状态。\n      var ub = document.getElementById('dsh-ub')\n      var ubVisible = !!ub && !ub.hidden && ub.offsetHeight > 0\n      var top = ubVisible ? ub.offsetHeight : 0\n\n      var hostEl = document.createElement('div')\n      hostEl.setAttribute('data-dsh-notice', '')\n      hostEl.style.cssText = 'position:fixed;inset:0;z-index:2147482999;display:block;pointer-events:none;'\n      var root = hostEl.attachShadow({ mode: 'open' })\n      var style = document.createElement('style')\n      style.textContent = \"\\n:host { all: initial; }\\n* { box-sizing: border-box; }\\n#dsh-notice-bar {\\n  position: fixed; left: 0; right: 0; z-index: 2147482999;\\n  display: flex; flex-direction: column; gap: 8px;\\n  padding: 10px 16px 12px;\\n  font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', system-ui, 'Microsoft YaHei UI', sans-serif;\\n  pointer-events: none;\\n}\\n#dsh-notice-bar[hidden] { display: none; }\\n#dsh-notice-bar .n-item {\\n  pointer-events: auto;\\n  display: flex; align-items: flex-start; gap: 10px;\\n  padding: 10px 12px;\\n  border-radius: 12px;\\n  border: 1px solid var(--dsh-dlg-glass-border);\\n  background: var(--dsh-dlg-glass-strong);\\n  -webkit-backdrop-filter: blur(12px) saturate(180%);\\n  backdrop-filter: blur(12px) saturate(180%);\\n  box-shadow: var(--dsh-dlg-shadow);\\n  color: var(--dsh-dlg-body);\\n  font-size: 13px; line-height: 1.6;\\n  animation: n-slide 180ms cubic-bezier(.2, .8, .2, 1);\\n}\\n#dsh-notice-bar .n-item[data-level=\\\"warning\\\"] { border-left: 3px solid var(--dsh-dlg-notice-bar); }\\n#dsh-notice-bar .n-item[data-level=\\\"error\\\"] { border-left: 3px solid #b42318; }\\n#dsh-notice-bar .n-item[data-level=\\\"info\\\"] { border-left: 3px solid var(--dsh-dlg-primary-bg); }\\n#dsh-notice-bar .n-icon { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--dsh-dlg-muted); }\\n#dsh-notice-bar .n-item[data-level=\\\"warning\\\"] .n-icon { color: var(--dsh-dlg-icon-warning); }\\n#dsh-notice-bar .n-item[data-level=\\\"error\\\"] .n-icon { color: var(--dsh-dlg-icon-error); }\\n#dsh-notice-bar .n-item[data-level=\\\"info\\\"] .n-icon { color: var(--dsh-dlg-icon-info); }\\n#dsh-notice-bar .n-text { min-width: 0; flex: 1; }\\n#dsh-notice-bar .n-title { font-weight: 600; color: var(--dsh-dlg-fg); }\\n#dsh-notice-bar .n-body { margin-top: 2px; white-space: pre-wrap; color: var(--dsh-dlg-muted); }\\n#dsh-notice-bar .n-actions { display: flex; align-items: center; gap: 6px; flex: none; }\\n#dsh-notice-bar .n-btn {\\n  height: 28px; padding: 0 12px; border-radius: 8px; cursor: pointer;\\n  font-family: inherit; font-size: 12px; font-weight: 500;\\n  border: 1px solid var(--dsh-dlg-glass-border);\\n  background: var(--dsh-dlg-btn-surface); color: var(--dsh-dlg-body);\\n}\\n#dsh-notice-bar .n-btn:hover { background: var(--dsh-dlg-btn-surface-hover); }\\n#dsh-notice-bar .n-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }\\n#dsh-notice-bar .n-close {\\n  width: 28px; height: 28px; border: 1px solid transparent; border-radius: 8px;\\n  background: transparent; color: var(--dsh-dlg-muted);\\n  font-size: 16px; line-height: 1; cursor: pointer; font-family: inherit;\\n}\\n#dsh-notice-bar .n-close:hover { background: var(--dsh-dlg-hover); color: var(--dsh-dlg-fg); }\\n#dsh-notice-bar .n-close:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }\\n@keyframes n-slide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }\\n@media (prefers-reduced-motion: reduce) { #dsh-notice-bar .n-item { animation: none; } }\\n\"\n\n      var bar = document.createElement('div')\n      bar.id = 'dsh-notice-bar'\n      bar.style.top = top + 'px'\n\n      NOTICES.forEach(function (n) {\n        var item = document.createElement('div')\n        item.className = 'n-item'\n        item.setAttribute('data-level', n.level)\n        item.setAttribute('data-notice-id', n.id)\n        item.appendChild(icon(LEVEL_ICON[n.level] || 'info'))\n\n        var text = document.createElement('div')\n        text.className = 'n-text'\n        var title = document.createElement('div')\n        title.className = 'n-title'\n        title.textContent = n.title\n        var body = document.createElement('div')\n        body.className = 'n-body'\n        body.textContent = n.body\n        text.appendChild(title)\n        text.appendChild(body)\n\n        var actions = document.createElement('div')\n        actions.className = 'n-actions'\n        if (n.link) {\n          var link = document.createElement('button')\n          link.type = 'button'\n          link.className = 'n-btn'\n          link.textContent = n.link.label\n          link.addEventListener('click', function () {\n            // 复用既有 open-external 通道（受 isTrustedSender 守卫 + 协议白名单），\n            // 不在这里直接调 shell.openExternal\n            if (window.dsh && typeof window.dsh.openExternal === 'function') {\n              window.dsh.openExternal(n.link.url)\n            }\n          })\n          actions.appendChild(link)\n        }\n        if (n.dismissible) {\n          var close = document.createElement('button')\n          close.type = 'button'\n          close.className = 'n-close'\n          close.setAttribute('aria-label', '关闭公告')\n          close.textContent = '×'\n          close.addEventListener('click', function () {\n            item.remove()\n            if (window.dsh && typeof window.dsh.noticeRead === 'function') {\n              window.dsh.noticeRead(n.id)\n            }\n          })\n          actions.appendChild(close)\n        }\n        item.appendChild(text)\n        item.appendChild(actions)\n        bar.appendChild(item)\n      })\n\n      root.appendChild(style)\n      root.appendChild(bar)\n      ;(document.body || document.documentElement).appendChild(hostEl)\n    })()\n  ";
+
+function applyVars () {
+  var v = VARS[document.body.dataset.theme] || VARS.light
+  for (var k in v) document.documentElement.style.setProperty(k, v[k])
+}
+
+document.getElementById('show').addEventListener('click', function () {
+  applyVars()
+  ;(0, eval)(BANNER_SCRIPT)
+  applyVars()
+})
+document.getElementById('toggle-ub').addEventListener('click', function () {
+  var ub = document.getElementById('fake-ub')
+  ub.hidden = !ub.hidden
+  // 重新投影以验证 top 偏移随 #dsh-ub 可见性变化
+  applyVars()
+  ;(0, eval)(BANNER_SCRIPT)
+})
+document.getElementById('theme').addEventListener('click', function () {
+  document.body.dataset.theme = document.body.dataset.theme === 'dark' ? 'light' : 'dark'
+  applyVars()
+  ;(0, eval)(BANNER_SCRIPT)
+})
+try {
+  if ((location.hash || '').replace('#', '') === 'dark') {
+    document.body.dataset.theme = 'dark'
+    applyVars()
+  }
+  if (location.hash && location.hash.indexOf('show') >= 0) {
+    applyVars(); (0, eval)(BANNER_SCRIPT)
+  }
+} catch (e) { /* 预览失败不阻塞 */ }
+</script>
+</body>
+</html>

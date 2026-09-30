@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH Desktop — 公告配置参数说明（notifications.json）</title>
+<style>
+  :root {
+    --page: #eef0f3;
+    --card: rgba(255, 255, 255, 0.72);
+    --card-solid: #ffffff;
+    --border: rgba(17, 24, 39, 0.09);
+    --border-strong: rgba(17, 24, 39, 0.16);
+    --fg: #111827;
+    --body: #374151;
+    --muted: #5b6570;
+    --accent: #0369a1;
+    --accent-soft: rgba(3, 105, 161, 0.1);
+    --info: #0369a1;
+    --warning: #b45309;
+    --warning-soft: rgba(217, 119, 6, 0.09);
+    --error: #b42318;
+    --error-soft: rgba(180, 35, 24, 0.08);
+    --ok: #15803d;
+    --ok-soft: rgba(22, 163, 74, 0.12);
+    --code-bg: rgba(17, 24, 39, 0.05);
+    --shadow: 0 24px 48px -16px rgba(16, 24, 40, 0.3), 0 4px 8px -4px rgba(16, 24, 40, 0.12);
+    --radius: 24px;
+    --font: -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei UI", sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0b1220;
+      --card: rgba(31, 41, 55, 0.72);
+      --card-solid: #1f2937;
+      --border: rgba(255, 255, 255, 0.11);
+      --border-strong: rgba(255, 255, 255, 0.2);
+      --fg: #f9fafb;
+      --body: #d1d5db;
+      --muted: #9ca3af;
+      --accent: #7dd3fc;
+      --accent-soft: rgba(125, 211, 252, 0.12);
+      --info: #7dd3fc;
+      --warning: #fbbf24;
+      --warning-soft: rgba(251, 191, 36, 0.12);
+      --error: #f87171;
+      --error-soft: rgba(248, 113, 113, 0.12);
+      --ok: #86efac;
+      --ok-soft: rgba(34, 197, 94, 0.14);
+      --code-bg: rgba(0, 0, 0, 0.3);
+      --shadow: 0 24px 48px -16px rgba(0, 0, 0, 0.65), 0 4px 8px -4px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+
+  body {
+    margin: 0;
+    padding: 32px 28px 96px;
+    background: var(--page);
+    color: var(--body);
+    font-family: var(--font);
+    font-size: 14.5px;
+    line-height: 1.75;
+  }
+
+  /* 背景上的两团柔光，给玻璃一点可折射的东西 */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(620px 420px at 12% -6%, rgba(3, 105, 161, 0.18), transparent 65%),
+      radial-gradient(560px 400px at 92% 4%, rgba(124, 58, 237, 0.14), transparent 62%);
+    pointer-events: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    body::before {
+      background:
+        radial-gradient(620px 420px at 12% -6%, rgba(14, 116, 144, 0.3), transparent 65%),
+        radial-gradient(560px 400px at 92% 4%, rgba(76, 29, 149, 0.32), transparent 62%);
+    }
+  }
+
+  .wrap { max-width: 1160px; margin: 0 auto; }
+
+  /* ── 页头 ───────────────────────────────────────────── */
+  header.hero {
+    background: var(--card);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.5);
+    padding: 32px 34px;
+    margin-bottom: 24px;
+  }
+  header.hero h1 {
+    margin: 10px 0 6px;
+    font-size: 25px;
+    font-weight: 650;
+    line-height: 1.35;
+    color: var(--fg);
+    letter-spacing: 0.01em;
+  }
+  header.hero p.lede { margin: 0; color: var(--muted); font-size: 14px; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .chip {
+    padding: 4px 11px; border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+    background: var(--accent-soft); color: var(--accent);
+  }
+
+  /* ── 布局：侧栏目录 + 正文 ───────────────────────────── */
+  .cols { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 24px; align-items: start; }
+  @media (max-width: 940px) { .cols { grid-template-columns: 1fr; } }
+
+  nav.toc {
+    position: sticky; top: 24px;
+    background: var(--card);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: var(--shadow);
+    padding: 14px 12px;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+    /* 目录 18 行刚好会压线溢出十几像素、常驻一条滚动轨道。
+       把行高与内边距收一点让它在 720px 高的窗口里也放得下，轨道只在真溢出时出现 */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  nav.toc::-webkit-scrollbar { width: 5px; }
+  nav.toc::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 3px;
+  }
+  nav.toc::-webkit-scrollbar-track { background: transparent; }
+  nav.toc .toc-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--muted);
+    padding: 0 10px 6px;
+  }
+  nav.toc a {
+    display: block; padding: 5px 10px; border-radius: 9px;
+    color: var(--body); text-decoration: none; font-size: 13.5px; line-height: 1.5;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  nav.toc a:hover { background: var(--code-bg); color: var(--fg); }
+  nav.toc a.sub { padding-left: 24px; font-size: 13px; color: var(--muted); }
+
+  /* ── 区块 ───────────────────────────────────────────── */
+  section {
+    background: var(--card);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.45);
+    padding: 28px 30px;
+    margin-bottom: 20px;
+  }
+  section > h2 {
+    margin: 0 0 4px;
+    font-size: 18px; font-weight: 650; color: var(--fg);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  section > h2 .num {
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft);
+    padding: 2px 8px; border-radius: 7px;
+  }
+  section > .sub { margin: 0 0 20px; color: var(--muted); font-size: 13.5px; }
+  h3 {
+    margin: 28px 0 10px; font-size: 15px; font-weight: 650; color: var(--fg);
+  }
+  p { margin: 10px 0; }
+  a { color: var(--accent); }
+  strong { color: var(--fg); font-weight: 650; }
+  ul, ol { margin: 10px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  li::marker { color: var(--muted); }
+
+  code {
+    font-family: var(--mono); font-size: 12.5px;
+    background: var(--code-bg); border-radius: 6px; padding: 1px 6px;
+    color: var(--fg);
+  }
+  pre {
+    margin: 12px 0; padding: 16px 18px; overflow-x: auto;
+    background: var(--code-bg); border-radius: 16px;
+    border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.75;
+    color: var(--body);
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  /* ── 参数卡片 ───────────────────────────────────────── */
+  .param {
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.4);
+    padding: 18px 20px 16px;
+    margin: 14px 0;
+  }
+  @media (prefers-color-scheme: dark) { .param { background: rgba(255, 255, 255, 0.03); } }
+  .param > .head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .param .name {
+    font-family: var(--mono); font-size: 13.5px; font-weight: 650; color: var(--fg);
+    background: var(--code-bg); border-radius: 8px; padding: 3px 10px;
+  }
+  .param .type { font-size: 12px; color: var(--muted); }
+  .tag {
+    font-size: 11.5px; font-weight: 650; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid transparent;
+  }
+  .tag.req { background: var(--error-soft); color: var(--error); }
+  .tag.opt { background: var(--code-bg); color: var(--muted); }
+
+  .rows { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 4px 14px; margin: 8px 0 0; }
+  @media (max-width: 560px) { .rows { grid-template-columns: 1fr; } }
+  .rows dt {
+    font-size: 12.5px; font-weight: 650; color: var(--muted); padding-top: 1px;
+  }
+  .rows dd { margin: 0; }
+
+  /* ── 可选值 ─────────────────────────────────────────── */
+  .values { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
+  .values > li {
+    display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px;
+    align-items: start; margin: 0; padding: 10px 12px;
+    border-radius: 12px; background: rgba(255, 255, 255, 0.45);
+    border: 1px solid var(--border);
+  }
+  @media (prefers-color-scheme: dark) { .values > li { background: rgba(255, 255, 255, 0.035); } }
+  @media (max-width: 620px) { .values > li { grid-template-columns: 1fr; } }
+  .values .k { font-family: var(--mono); font-size: 12.5px; font-weight: 650; color: var(--fg); }
+  .values .d { font-size: 13.5px; }
+  .values .d em { color: var(--muted); font-style: normal; }
+
+  /* 级别色片 */
+  .swatch {
+    display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 7px; vertical-align: 1px;
+  }
+  .swatch.info { background: var(--info); }
+  .swatch.warning { background: var(--warning); }
+  .swatch.error { background: var(--error); }
+  .swatch.ok { background: var(--ok); }
+
+  /* ── 提示条 ─────────────────────────────────────────── */
+  .callout {
+    display: flex; gap: 11px; align-items: flex-start;
+    margin: 14px 0; padding: 13px 16px;
+    border-radius: 14px; border-left: 3px solid var(--accent);
+    background: var(--accent-soft); font-size: 13.5px;
+  }
+  .callout.warn { border-left-color: var(--warning); background: var(--warning-soft); }
+  .callout.danger { border-left-color: var(--error); background: var(--error-soft); }
+  .callout .mark { font-weight: 700; flex: none; }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ── 表格 ───────────────────────────────────────────── */
+  .table-scroll { overflow-x: auto; margin: 14px 0; border-radius: 16px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 540px; }
+  thead th {
+    text-align: left; font-weight: 650; color: var(--fg); font-size: 12.5px;
+    letter-spacing: 0.03em; padding: 11px 14px;
+    background: var(--code-bg); border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td:first-child { color: var(--fg); font-weight: 550; white-space: nowrap; }
+  tbody td .mono { font-family: var(--mono); font-size: 12.5px; }
+
+  /* ── 编号清单 ───────────────────────────────────────── */
+  .checks { list-style: none; counter-reset: c; padding: 0; margin: 12px 0 0; columns: 2; column-gap: 28px; }
+  @media (max-width: 760px) { .checks { columns: 1; } }
+  .checks li {
+    counter-increment: c; margin: 0 0 8px; padding-left: 30px; position: relative;
+    break-inside: avoid; font-size: 13.5px;
+  }
+  .checks li::before {
+    content: counter(c); position: absolute; left: 0; top: 1px;
+    width: 20px; height: 20px; border-radius: 6px;
+    background: var(--error-soft); color: var(--error);
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* ── 问答 ───────────────────────────────────────────── */
+  .qa { display: grid; gap: 12px; margin-top: 14px; }
+  .qa details {
+    border: 1px solid var(--border); border-radius: 16px;
+    background: rgba(255, 255, 255, 0.4); padding: 0;
+  }
+  @media (prefers-color-scheme: dark) { .qa details { background: rgba(255, 255, 255, 0.03); } }
+  .qa summary {
+    cursor: pointer; list-style: none; padding: 13px 18px;
+    font-weight: 650; color: var(--fg); font-size: 14px;
+    display: flex; gap: 10px; align-items: flex-start;
+  }
+  .qa summary::-webkit-details-marker { display: none; }
+  .qa summary::before {
+    content: "＋"; font-family: var(--mono); color: var(--accent);
+    font-weight: 700; flex: none;
+  }
+  .qa details[open] summary::before { content: "－"; }
+  .qa details[open] summary { border-bottom: 1px solid var(--border); }
+  .qa .ans { padding: 4px 18px 16px 18px; font-size: 13.5px; }
+  .qa .ans > :first-child { margin-top: 10px; }
+  .qa .ans > :last-child { margin-bottom: 0; }
+
+  .backtop {
+    display: inline-block; margin-top: 20px; font-size: 13px;
+    text-decoration: none; color: var(--accent); font-weight: 600;
+  }
+  .backtop:hover { text-decoration: underline; }
+
+  footer {
+    margin-top: 28px; text-align: center;
+    color: var(--muted); font-size: 12.5px;
+  }
+  footer code { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="eyebrow">DSH Desktop · 配置参考</span>
+    <h1>公告配置参数说明</h1>
+    <p class="lede">notifications.json 里每一个参数的含义、可选值，以及每个值分别代表什么。</p>
+    <div class="chips">
+      <span class="chip">对应版本 1.0.17</span>
+      <span class="chip">同源：download.dsh.392700.xyz</span>
+      <span class="chip">改内容不用发版</span>
+    </div>
+  </header>
+
+  <div class="cols">
+
+    <nav class="toc">
+      <div class="toc-title">目录</div>
+      <a href="#s1">一、这个文件是什么</a>
+      <a href="#s2">二、整体结构</a>
+      <a href="#s3">三、顶层参数</a>
+      <a href="#s4">四、单条公告参数</a>
+      <a href="#s4-1" class="sub">id</a>
+      <a href="#s4-2" class="sub">type</a>
+      <a href="#s4-3" class="sub">level</a>
+      <a href="#s4-4" class="sub">title / body</a>
+      <a href="#s4-5" class="sub">link</a>
+      <a href="#s4-6" class="sub">startsAt / expiresAt</a>
+      <a href="#s4-7" class="sub">dismissible</a>
+      <a href="#s5">五、硬限制</a>
+      <a href="#s6">六、校验规则</a>
+      <a href="#s7">七、已读行为</a>
+      <a href="#s8">八、拉取与失败</a>
+      <a href="#s9">九、完整示例</a>
+      <a href="#s10">十、发布与下线</a>
+      <a href="#s11">十一、常见问题</a>
+    </nav>
+
+    <main>
+
+      <!-- 1 -->
+      <section id="s1">
+        <h2><span class="num">01</span>这个文件是什么</h2>
+        <p class="sub">公告的内容来源，以及它最重要的一个性质。</p>
+
+        <p>客户端从与安装包<strong>同一个分发源</strong>拉取公告，完整地址：</p>
+        <pre><code>https://download.dsh.392700.xyz/notifications.json</code></pre>
+
+        <p>放在这里而不是 GitHub Releases 的原因：与版本清单 <code>latest.yml</code> 同源，发布链路已经跑通（上传顺序、校验脚本都是现成的）。由此带来一个关键性质：</p>
+
+        <div class="callout">
+          <span class="mark">改公告内容不需要发新版本，也不需要用户更新应用。</span>
+        </div>
+
+        <p>想发一条维护通知，改这个文件、覆盖上传即可。已经装了的旧版本客户端会在下一次启动或下一次 6 小时轮询时自动看到。</p>
+        <a class="backtop" href="#">回到顶部</a>
+      </section>
+
+      <!-- 2 -->
+      <section id="s2">
+        <h2><span class="num">02</span>整体结构</h2>
+        <p class="sub">文件最外层是一个对象，只有两个字段。</p>
+        <pre><code>{
+  "version": 1,
+  "notices": [ 单条公告, 单条公告, ... ]
+}</code></pre>
+      </section>
+
+      <!-- 3 -->
+      <section id="s3">
+        <h2><span class="num">03</span>顶层参数</h2>
+        <p class="sub">文件级的两个字段。</p>
+
+        <div class="param">
+          <div class="head">
+            <span class="name">version</span>
+            <span class="type">整数</span>
+            <span class="tag opt">选填</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>配置文件格式的版本号。</dd>
+            <dt>可选值</dt><dd>任意整数，通常填 <code>1</code>。</dd>
+          </dl>
+          <div class="callout warn">
+            <span class="mark">注意</span>
+            <p>客户端<strong>不校验</strong>这个字段，它被完整忽略。写错、甚至整个删掉都不影响公告生效。保留它只是为了将来格式要演进时有地方放版本号 —— <strong>不要因为它写错而去排查公告为什么不显示</strong>。</p>
+          </div>
+        </div>
+
+        <div class="param">
+          <div class="head">
+            <span class="name">notices</span>
+            <span class="type">数组</span>
+            <span class="tag req">必填</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>公告数组，所有公告都写在这个数组里。</dd>
+            <dt>限制</dt><dd>缺这个字段整份文件作废；条数上限 <strong>20 条</strong>，超过则整份文件作废，一条都不展示。</dd>
+          </dl>
+        </div>
+      </section>
+
+      <!-- 4 -->
+      <section id="s4">
+        <h2><span class="num">04</span>单条公告参数</h2>
+        <p class="sub">一条公告就是一个对象，字段如下。</p>
+
+        <div class="param" id="s4-1">
+          <div class="head">
+            <span class="name">id</span>
+            <span class="type">字符串</span>
+            <span class="tag req">必填</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>这条公告的唯一标识，也是「已读记录」的唯一键。</dd>
+            <dt>格式</dt><dd>只允许英文字母、数字、点、下划线、短横线，长度 1–64。正则 <code>^[A-Za-z0-9._-]{1,64}$</code></dd>
+            <dt>下线方式</dt><dd>从数组删掉它，或让它过期；<strong>不要改 id</strong>。</dd>
+          </dl>
+          <div class="callout danger">
+            <span class="mark">三个必须知道的点</span>
+            <ul style="margin-bottom:0">
+              <li>改了 id 就等于<strong>发了一条新公告</strong> —— 所有人都会重新看到，包括已读过的用户。id 一旦定下就别改。</li>
+              <li>想让公告下线，正确做法是删除或让它过期，不是改 id。</li>
+              <li>该字段不参与任何路径拼接，客户端仍按字符集收窄，是为了防止将来有代码误用它拼路径。</li>
+            </ul>
+          </div>
+          <p>建议写法：带日期前缀，便于排序与排查，例如 <code>2026-09-30-maint-1004</code>、<code>2026-09-30-client-1-0-17</code>。</p>
+        </div>
+
+        <div class="param" id="s4-2">
+          <div class="head">
+            <span class="name">type</span>
+            <span class="type">字符串</span>
+            <span class="tag opt">选填 · 缺省 banner</span>
+          </div>
+          <dl class="rows"><dt>含义</dt><dd>这条公告以什么形态展示。</dd></dl>
+          <ul class="values">
+            <li>
+              <span class="k">"banner"</span>
+              <span class="d">横幅。贴在 DSH 会话页面顶部，最多同时堆叠 3 条。<strong>不打断</strong>用户手头的工作，随时可用右侧 × 关掉。适合日常通知、版本说明、轻度提醒。</span>
+            </li>
+            <li>
+              <span class="k">"modal"</span>
+              <span class="d">弹窗。走客户端自绘的对话框层（与「检查更新」「退出确认」同一套玻璃卡片），<strong>延迟 10 秒</strong>在 DSH 页面就绪后弹出。适合真正需要看到的重要事件：停服、强制升级、账号异常。它会进入对话框队列，因此不会和更新确认框叠在一起。</span>
+            </li>
+          </ul>
+          <div class="callout warn">
+            <span class="mark">注意</span>
+            <p><strong>"modal" 没有条数上限</strong>（只有 "banner" 截断到 3 条）。配了 10 条模态公告，用户会连续被弹 10 次。模态公告一次最多放一两条。</p>
+          </div>
+        </div>
+
+        <div class="param" id="s4-3">
+          <div class="head">
+            <span class="name">level</span>
+            <span class="type">字符串</span>
+            <span class="tag opt">选填 · 缺省 info</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>语义级别，决定配色、图标，以及多条公告同时存在时的排序。</dd>
+            <dt>排序</dt><dd>多条同时有效时按 error → warning → info 排，最紧急的永远在最上面，不会被一条 info 挤下去。</dd>
+          </dl>
+          <ul class="values">
+            <li><span class="k"><span class="swatch info"></span>"info"</span><span class="d">蓝色。普通信息：版本发布、使用提示、日常说明。</span></li>
+            <li><span class="k"><span class="swatch warning"></span>"warning"</span><span class="d">琥珀色。需要注意但不紧急：即将维护、功能将变更。</span></li>
+            <li><span class="k"><span class="swatch error"></span>"error"</span><span class="d">红色。必须马上知道：服务不可用、必须升级、Key 失效。</span></li>
+          </ul>
+          <p><em>配色</em>：横幅左侧色条与图标颜色都由此决定；模态公告复用对话框层对应级别的图标。</p>
+        </div>
+
+        <div class="param" id="s4-4">
+          <div class="head">
+            <span class="name">title</span>
+            <span class="type">字符串</span>
+            <span class="tag req">必填</span>
+            <span style="color:var(--border-strong)">|</span>
+            <span class="name">body</span>
+            <span class="type">字符串</span>
+            <span class="tag req">必填</span>
+          </div>
+          <dl class="rows">
+            <dt>title</dt><dd>公告标题，第一行。<strong>上限 60 字符</strong>，只占一行，换行符无效。</dd>
+            <dt>body</dt><dd>公告正文，第二行起。<strong>上限 2000 字符</strong>。</dd>
+            <dt>格式</dt><dd>两者都是<strong>纯文本</strong>。HTML 标签不会被解析，会原样显示成文字。</dd>
+          </dl>
+          <div class="callout warn">
+            <span class="mark">body 想加粗 / 做列表 / 插链接都做不到</span>
+            <p>只能靠换行和符号（例如用「- 」开头做视觉上的列表项）。换行符 <code>\n</code> 会被保留并按原样换行显示。</p>
+          </div>
+          <p>例：标题 <code>今晚 02:00–04:00 服务维护</code>；正文第一行 <code>维护期间 DSH 服务会短暂不可用，正在进行的会话会中断。</code></p>
+        </div>
+
+        <div class="param" id="s4-5">
+          <div class="head">
+            <span class="name">link</span>
+            <span class="type">对象</span>
+            <span class="tag opt">选填</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>给这条公告挂一个「查看详情」的跳转按钮。省略就没有这个按钮。</dd>
+            <dt>子字段</dt><dd><code>label</code>（按钮文字）与 <code>url</code>（跳转地址），两者都必须给。</dd>
+          </dl>
+          <pre><code>"link": { "label": "查看详情", "url": "https://example.com/status" }</code></pre>
+          <ul class="values">
+            <li>
+              <span class="k">link.label</span>
+              <span class="d">按钮上显示的文字，<strong>上限 24 字符</strong>。例：查看详情 / 查看更新日志</span>
+            </li>
+            <li>
+              <span class="k">link.url</span>
+              <span class="d">用系统默认浏览器打开的地址，<strong>上限 2048 字符</strong>。</span>
+            </li>
+          </ul>
+          <div class="callout danger">
+            <span class="mark">url 只允许 https:// 开头</span>
+            <p><code>javascript:</code> 、 <code>data:</code> 、 <code>http://</code> 、本地文件路径 —— 全部在解析阶段直接拒绝，并且<strong>导致整份文件作废</strong>（不是只丢这一条）。</p>
+            <p>为什么不放开 http：公告内容来自可被篡改的远端文件，放开 <code>javascript:</code> 等价于把 XSS 入口装进客户端。</p>
+          </div>
+        </div>
+
+        <div class="param" id="s4-6">
+          <div class="head">
+            <span class="name">startsAt</span>
+            <span class="type">ISO 8601 字符串</span>
+            <span class="tag opt">选填</span>
+            <span style="color:var(--border-strong)">|</span>
+            <span class="name">expiresAt</span>
+            <span class="type">ISO 8601 字符串</span>
+            <span class="tag opt">选填</span>
+          </div>
+          <dl class="rows">
+            <dt>startsAt</dt><dd>最早什么时候开始生效。省略 = 拿到就展示。写一个未来的时间，到点之前用户看不到。格式如 <code>2026-10-01T00:00:00Z</code>。</dd>
+            <dt>expiresAt</dt><dd>什么时候自动失效、不再展示。省略 = 永不过期。必须<strong>晚于</strong> startsAt（若两者都写）。</dd>
+          </dl>
+          <div class="callout warn">
+            <span class="mark">强烈建议写 expiresAt</span>
+            <p>不写的话，一条忘记下线的公告会一直挂在所有用户页面上，直至用户手动 × 掉它。公告的寿命应该由这个字段控制。</p>
+          </div>
+        </div>
+
+        <div class="param" id="s4-7">
+          <div class="head">
+            <span class="name">dismissible</span>
+            <span class="type">布尔值</span>
+            <span class="tag opt">选填 · 缺省 true</span>
+          </div>
+          <dl class="rows">
+            <dt>含义</dt><dd>横幅能不能被用户手动关掉。</dd>
+            <dt>适用范围</dt><dd>只对 <code>"banner"</code> 有意义。<code>"modal"</code> 本来就是通过「我知道了」或 Esc 关掉的。</dd>
+          </dl>
+          <ul class="values">
+            <li>
+              <span class="k">true</span>
+              <span class="d">可以关。显示一个 ×，点掉后记为已读、不再出现。<strong>绝大多数公告都该用这个。</strong></span>
+            </li>
+            <li>
+              <span class="k">false</span>
+              <span class="d">关不掉。没有 ×，横幅一直挂在页面顶部直到 expiresAt 到期；也<strong>不会被记入已读</strong>，所以下次启动会再次出现 —— 这是「强制」语义的实现方式。适用：强制升级提示、长时间停服公告。</span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 5 -->
+      <section id="s5">
+        <h2><span class="num">05</span>硬限制一览</h2>
+        <p class="sub">越过红线时的行为都是「整份文件作废」，不是局部降级。</p>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>项目</th><th>上限</th><th>超出时</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>notices 数组条数</td><td class="mono">20 条</td><td>整份文件作废，一条都不展示</td></tr>
+              <tr><td>整个文件大小</td><td class="mono">256 KB</td><td>整份文件作废</td></tr>
+              <tr><td>同时展示的横幅</td><td class="mono">3 条</td><td>多余的丢弃（按 error→warning→info 排序后取前 3）</td></tr>
+              <tr><td>同时弹出的模态</td><td class="mono">无上限</td><td>会连续弹，请少量使用</td></tr>
+              <tr><td>本地已读记录条数</td><td class="mono">200 条</td><td>按标记时间升序，自动淘汰最早的</td></tr>
+              <tr><td>网络请求超时</td><td class="mono">8 秒</td><td>视为失败</td></tr>
+              <tr><td>文件不存在（HTTP 404）</td><td class="mono">——</td><td>视为「没有公告」，<strong>不是错误</strong>。这让客户端可以先于本文件上线。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 6 -->
+      <section id="s6">
+        <h2><span class="num">06</span>校验规则</h2>
+        <p class="sub">逐条校验，任一条不合法则整份文件作废。</p>
+
+        <div class="callout danger">
+          <span class="mark">全有或全无</span>
+          <p>任一条公告的任一字段不合法 → 整份文件作废，一条都不展示。这是刻意的设计，不是缺陷：半截公告（标题显示了、正文是空的，或者链接按钮指向恶意地址）比完全没有公告更糟。</p>
+        </div>
+
+        <p>以下情况会导致整份文件作废：</p>
+        <ol class="checks">
+          <li>文件不是合法的 JSON</li>
+          <li>最外层不是一个对象</li>
+          <li>缺少 notices 数组，或它不是数组</li>
+          <li>文件超过 256 KB</li>
+          <li>公告条数超过 20</li>
+          <li>id 缺失、不合规字符或超长</li>
+          <li>两条公告用了同一个 id</li>
+          <li>type 不在 banner / modal 之中</li>
+          <li>level 不在 info / warning / error 之中</li>
+          <li>title 缺失、为空或超长</li>
+          <li>body 缺失、为空或超长</li>
+          <li>link 不是对象，或其 label / url 缺失、超长</li>
+          <li>link.url 不是 https: 开头</li>
+          <li>startsAt / expiresAt 不是合法 ISO 时间</li>
+          <li>expiresAt 早于或等于 startsAt</li>
+          <li>dismissible 不是布尔值</li>
+        </ol>
+
+        <div class="callout">
+          <span class="mark">这些规则有命令守着</span>
+          <p><code>node scripts/preview-notice.js</code> 会在<strong>生成预览页时就跑 12 类非法输入的断言</strong>，任一条该被拒的没被拒，命令直接失败中止。改了校验规则会立刻暴露。</p>
+        </div>
+
+        <h3>另外三层安全约束</h3>
+        <ul>
+          <li>正文与标题只用 <code>textContent</code> 渲染，<strong>永不解析 HTML</strong></li>
+          <li>注入脚本里唯一一处 <code>innerHTML</code> 是图标路径，那是主程序里的常量，不是远端传来的内容</li>
+          <li>横幅的「查看详情」走客户端既有的外链通道（带调用来源校验与协议白名单），不是新开一个浏览器调用</li>
+        </ul>
+      </section>
+
+      <!-- 7 -->
+      <section id="s7">
+        <h2><span class="num">07</span>已读行为</h2>
+        <p class="sub">看过就不再打扰的机制。</p>
+
+        <dl class="rows" style="grid-template-columns:110px minmax(0,1fr);gap:10px 16px">
+          <dt>文件位置</dt>
+          <dd>
+            开发环境：<code>%APPDATA%\dsh-web-desktop\notice-read.json</code><br>
+            打包安装后：<code>%APPDATA%\DSH Desktop\notice-read.json</code><br>
+            <em style="color:var(--muted)">两种路径不同，是因为应用名在打包后才变成 "DSH Desktop"。</em>
+          </dd>
+
+          <dt>文件内容</dt>
+          <dd><pre style="margin:0"><code>{ "read": {
+  "2026-09-30-maint-1004": "2026-09-30T11:20:33.000Z"
+} }</code></pre></dd>
+
+          <dt>何时记已读</dt>
+          <dd>横幅：用户点右侧 ×<br>模态：点「我知道了」，或按 Esc，或点遮罩<br><em style="color:var(--muted)">dismissible 为 false 的横幅关不掉，因此也不会记已读，每次启动都会重新出现，直到它过期。</em></dd>
+
+          <dt>记了之后</dt>
+          <dd>同一条 id 的公告不再展示；新的公告（有新 id）照常展示。</dd>
+
+          <dt>排查用</dt>
+          <dd>删掉这个文件 = 所有公告重新出现一遍，方便验证「是不是已读逻辑挡住了」。</dd>
+
+          <dt>上限</dt>
+          <dd>200 条，超出后按标记时间从早到晚淘汰。</dd>
+        </dl>
+      </section>
+
+      <!-- 8 -->
+      <section id="s8">
+        <h2><span class="num">08</span>拉取时机与失败处理</h2>
+        <p class="sub">什么时候拉、失败时怎么表现。</p>
+
+        <h3>什么时候拉</h3>
+        <ol>
+          <li>每次启动，DSH 页面就绪之后（不阻塞启动流程）</li>
+          <li>每 6 小时轮询一次</li>
+          <li>用户点击标题栏的铃铛（立即拉取）</li>
+        </ol>
+
+        <h3>什么时候不拉</h3>
+        <p>开发环境（<code>npm run dev</code>）下，第 1、2 项自动拉取被跳过，避免打扰调试。但点铃铛的手动拉取<strong>在任何环境都会执行</strong> —— 这就是开发期验证公告 UI 的办法。</p>
+
+        <h3>失败时</h3>
+        <ul>
+          <li>启动与轮询路径：<strong>完全静默</strong>，只记一行日志，不给用户任何弹窗。理由：断网是常态，每次开应用都弹「拉取失败」会很烦。</li>
+          <li>点铃铛的手动路径：弹一个错误框说明原因。</li>
+        </ul>
+
+        <h3>日志位置</h3>
+        <p>主进程控制台，形如：</p>
+        <pre><code>[DSH] 拉取公告失败（startup）: 通知清单缺少 notices 数组</code></pre>
+        <p>排查配置问题时看这一行即可。</p>
+      </section>
+
+      <!-- 9 -->
+      <section id="s9">
+        <h2><span class="num">09</span>完整示例</h2>
+        <p class="sub">同目录下的 <code>notifications.example.json</code> 就是这份，可直接复制改。</p>
+        <pre><code>{
+  "version": 1,
+  "notices": [
+    {
+      "id": "2026-09-30-client-1-0-17",
+      "type": "modal",
+      "level": "info",
+      "title": "DSH Desktop 1.0.17 已发布",
+      "body": "本次更新把全部弹窗统一成磨砂玻璃风格，并新增公告功能。",
+      "link": { "label": "查看更新日志", "url": "https://github.com/ycowner/deepseek-harness-desktop/releases" },
+      "startsAt": "2026-09-30T00:00:00Z",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "dismissible": true
+    },
+    {
+      "id": "2026-09-30-maint-1004",
+      "type": "banner",
+      "level": "warning",
+      "title": "今晚 02:00–04:00 服务维护",
+      "body": "维护期间 DSH 服务会短暂不可用，正在进行的会话会中断。\n其余功能不受影响。",
+      "link": { "label": "查看详情", "url": "https://example.com/status" },
+      "startsAt": "2026-09-30T00:00:00Z",
+      "expiresAt": "2026-10-01T06:00:00Z",
+      "dismissible": true
+    },
+    {
+      "id": "2026-09-30-forced-upgrade",
+      "type": "banner",
+      "level": "error",
+      "title": "请升级到 1.0.17",
+      "body": "当前版本存在已知问题，请先点击标题栏的「更新」完成升级。",
+      "dismissible": false
+    }
+  ]
+}</code></pre>
+      </section>
+
+      <!-- 10 -->
+      <section id="s10">
+        <h2><span class="num">10</span>发布与下线操作</h2>
+        <p class="sub">日常怎么用这个文件。</p>
+
+        <h3>上线一条公告</h3>
+        <ol>
+          <li>编辑 <code>notifications.json</code></li>
+          <li>先本地验一遍：<code>node scripts/preview-notice.js</code>（它会跑全部校验断言，不过就失败，不会生成坏文件）</li>
+          <li>覆盖上传到 <code>https://download.dsh.392700.xyz/notifications.json</code></li>
+          <li>注意 CDN 缓存。如果传完客户端没立刻看到，在文件名后加时间戳绕过，或等待缓存过期。</li>
+        </ol>
+
+        <h3>下线一条公告</h3>
+        <ul>
+          <li>方式一（推荐）：从 <code>notices</code> 数组里删掉它。</li>
+          <li>方式二：把 <code>expiresAt</code> 改成一个已经过去的时间。</li>
+          <li>不要用改 id 的办法 —— 那等于给所有人发了一条新公告。</li>
+        </ul>
+
+        <div class="callout">
+          <span class="mark">没有版本号语义</span>
+          <p>这个文件不参与版本比较，可以随时覆盖上传，不需要重新打包、不需要用户更新。它与安装包、<code>latest.yml</code> 只是共用同一个分发源。</p>
+        </div>
+      </section>
+
+      <!-- 11 -->
+      <section id="s11">
+        <h2><span class="num">11</span>常见问题</h2>
+        <p class="sub">点开看排查方向。</p>
+        <div class="qa">
+          <details>
+            <summary>公告完全不显示</summary>
+            <div class="ans">
+              <ul>
+                <li>多半是<strong>整份文件作废</strong>了。看主进程日志里有没有 <code>[DSH] 拉取公告失败</code> 这一行，里面写了具体原因。</li>
+                <li>确认文件真的传上去了（直接访问那个地址看得到内容）。</li>
+                <li>确认 <code>level</code> / <code>type</code> 的值没有拼错。</li>
+                <li>确认 <code>expiresAt</code> 还没到（过了时间会自动不显示）。</li>
+              </ul>
+            </div>
+          </details>
+
+          <details>
+            <summary>部分公告显示，部分不显示</summary>
+            <div class="ans">
+              <p><strong>不会这样。</strong>要么全显示要么全不显示（整份丢弃是全有全无的）。</p>
+              <p>唯一「部分」的情况是：超过 3 条的横幅会有多余的被丢弃；模态公告超过 1 条会连续弹多次。</p>
+            </div>
+          </details>
+
+          <details>
+            <summary>改了内容但客户端没变</summary>
+            <div class="ans"><p>缓存。等一会儿，或给文件名加时间戳绕过。</p></div>
+          </details>
+
+          <details>
+            <summary>公告一直不消失</summary>
+            <div class="ans"><p>很可能忘了写 <code>expiresAt</code>。补上并覆盖上传。</p></div>
+          </details>
+
+          <details>
+            <summary>想让用户重新看一遍某条公告</summary>
+            <div class="ans"><p>删掉本地的 <code>notice-read.json</code>，或给这条换一个 id（后者会给所有用户都重发一遍）。</p></div>
+          </details>
+        </div>
+        <a class="backtop" href="#">回到顶部</a>
+      </section>
+
+      <footer>
+        DSH Desktop · 公告配置参数说明 · 对应版本 1.0.17 · 同源文件 <code>docs/notifications.params.txt</code> 为纯文本副本
+      </footer>
+
+    </main>
+  </div>
+</div>
+</body>
+</html>

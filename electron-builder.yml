@@ -30,6 +30,18 @@ win:
     - zh-CN
     - zh-TW
     - en-US
+# 客户端自动更新：安装包发布到 Cloudflare R2，通过自持域名的边缘节点分发。
+# - provider: generic  —— electron-updater 每次检查只 GET {url}/latest.yml，换存储只改这个 URL。
+#   详见 docs/AUTO-UPDATE-PLAN.md §3.2、§4.5。
+# - url 必须是 **自定义域名**，不能填 r2.dev 官方地址：后者官方标注
+#   "is not intended for production usage"，有可变速率限制（超限返 429）且带宽同样被限速。
+# - 产物当前未签名，故不设置 win.publisherName：该字段一旦写入而产物无有效签名，
+#   electron-updater 会判定签名校验失败并直接拒绝安装（详见 docs/AUTO-UPDATE-PLAN.md §2.2）。
+#   当前走 fail-open 分支，安装包完整性仅由 latest.yml 中的 sha512 保证。
+publish:
+  provider: generic
+  url: https://download.dsh.392700.xyz
+  channel: latest
 # 客户端更新：不再使用 electron-updater/Gitee 自动下载安装（自 1.0.3 起），
 # 改为 GitHub releases/latest API 检测新版本后引导用户打开 Release 页面手动下载（见 src/main/app-update.ts）
 nsis:
@@ -49,9 +61,10 @@ nsis:
   # 必须与 useZip 同时设置，不能只开 useZip：NsisTarget.js 在 differentialPackage
   # 未显式关闭时（isBuildDifferentialAware 为真）强制 format=7z，但同一处仍会定义
   # ZIP_COMPRESSION，结果是安装器用 nsisunz 去解一个 7z，安装必然失败。
-  # 关闭后不再生成 .blockmap（latest.yml 仍会生成，但缺 size 字段）：客户端更新只走
-  # GitHub releases API（src/main/app-update.ts），RELEASE_NOTES.md 也只记录 Setup exe
-  # 的校验值，两者均无消费方。
+  # 关闭后不再生成 .blockmap；latest.yml 仍会生成，但缺 files[].size 字段——
+  # electron-updater 用它做下载前的完整性预期校验，缺了会直接报错。
+  # 由 scripts/patch-latest-yml-size.js 在打包后补齐（幂等），再用
+  # scripts/verify-release.js 核对，详见 AGENTS.md §6.5。
   differentialPackage: false
   # 自定义安装/卸载钩子入口，承载 §8.1.1 的 ${isUpdated} 重定义（任务栏固定图标保留）
   # 与 customRemoveFiles（升级时跳过 atomicRMDir 逐文件搬运），不是纯文档文件。

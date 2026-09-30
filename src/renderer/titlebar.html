@@ -148,14 +148,85 @@
          （原因见上方按钮注释：原生菜单期间收不到鼠标事件，伪类会滞留）。
          主题机制与全页一致：默认浅色值，:root[data-theme='dark'] 覆盖深色值 */
 
-      /* 徽章容器：紧贴帮助按钮右侧（帮助按钮 left:186 + 宽48 + 8 间距）。
-         余额明细 tooltip 不在本页渲染（dshView 子视图绘制在主 webContents 之上会遮挡），
-         由主进程注入 DSH 内容页展示，故本容器只负责徽章自身布局 */
-      .bb-wrap {
+      /* ==================== 右侧操作区（余额徽章 + 更新按钮） ==================== */
+      /* 把余额徽章与两个更新按钮放进同一个 flex 容器：徽章宽度是动态的
+         （¥ 符号、金额位数、万/亿单位都会改变宽度），用固定 left 排更新按钮
+         必须知道徽章实际宽度，不可靠。flex 让按钮天然跟在徽章右侧，
+         徽章变宽变窄都不需要改任何像素。 */
+      .tb-actions {
         position: absolute;
         left: 242px;
+        /* 垂直居中于 48px 标题栏（28px 元素，上下各 10px） */
         top: 10px;
         height: 28px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* 余额徽章容器：原为绝对定位，改作 flex 子项后去掉定位 */
+      .bb-wrap {
+        height: 28px;
+        display: flex;
+      }
+
+      /* ==================== 公告铃铛 ==================== */
+      /* 点击 = 立即拉一次公告并展示（主进程 notice-refresh）。有未读时右上角挂红点。
+         交互态同样用 JS 管理的 is-hover / is-active 类名而非伪类，原因见上方帮助按钮注释。 */
+      .notice-bell {
+        position: relative;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        color: #666b74;
+        cursor: pointer;
+        -webkit-app-region: no-drag;
+      }
+
+      :root[data-theme='dark'] .notice-bell {
+        color: #9aa0a8;
+      }
+
+      .notice-bell.is-hover {
+        background: var(--tb-btn-hover);
+      }
+
+      .notice-bell.is-active {
+        background: var(--tb-btn-active);
+      }
+
+      .notice-bell:focus:not(:focus-visible) {
+        outline: none;
+      }
+
+      .notice-bell:focus-visible {
+        outline: 1px solid var(--tb-focus-ring);
+        outline-offset: -1px;
+      }
+
+      .notice-bell svg {
+        width: 15px;
+        height: 15px;
+      }
+
+      /* 未读红点：绝对定位在右上角，不参与 flex 布局 */
+      .notice-dot {
+        position: absolute;
+        top: 3px;
+        right: 3px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #cf222e;
+      }
+
+      .notice-dot[hidden] {
+        display: none;
       }
 
       /* 徽章基础：半透明底 + 中性灰字 + 1px 透明边框占位（警示态显边框时尺寸不跳动） */
@@ -330,6 +401,123 @@
         }
       }
 
+      /* ==================== 更新按钮 ==================== */
+      /* 两个按钮都是「有更新才出现」，无更新时 display:none 完全不占位。
+         「更新」= DSH Desktop 客户端，「更新DSH」= DSH 运行包。
+         配色沿用余额徽章的「浅色底 + 深色字」语汇（而非实心底白字），
+         这样同排三个元素的视觉重量一致，也避免在 48px 高的窄条上过分抢眼。
+         交互态同样是 is-hover / is-active 类名，原因见帮助/设置按钮的注释
+         （原生对话框弹出期间渲染进程收不到鼠标事件，伪类会滞留）。 */
+      .upd-btn {
+        height: 28px;
+        padding: 0 10px;
+        border: none;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1;
+        font-family: inherit;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background 0.15s;
+        /* 必须脱离拖拽区域，否则点击事件不会触发 */
+        -webkit-app-region: no-drag;
+      }
+
+      .upd-btn[hidden] {
+        display: none;
+      }
+
+      .upd-btn:focus:not(:focus-visible) {
+        outline: none;
+      }
+
+      .upd-btn:focus-visible {
+        outline: 1px solid var(--tb-focus-ring);
+        outline-offset: -1px;
+      }
+
+      /* 客户端更新：天蓝（sky-500 系）。文字色下沉到 sky-700 保证在浅色底上
+         对比度 ≥ 4.5:1（#0369A1 on rgba(14,165,233,.14) ≈ 4.69:1）。 */
+      .upd-btn--client {
+        background: rgba(14, 165, 233, 0.14);
+        color: #0369a1;
+      }
+
+      :root[data-theme='dark'] .upd-btn--client {
+        background: rgba(14, 165, 233, 0.2);
+        color: #7dd3fc;
+      }
+
+      .upd-btn--client.is-hover {
+        background: rgba(14, 165, 233, 0.26);
+      }
+
+      :root[data-theme='dark'] .upd-btn--client.is-hover {
+        background: rgba(14, 165, 233, 0.32);
+      }
+
+      /* 运行包更新：DeepSeek 官方蓝 #4D6BFE（Wikidata / Brandfetch / Logotyp.us /
+         LogoLabs 多源一致）。文字色取同色系稍暗的 #3A56D8 以满足对比度
+         （#3A56D8 on rgba(77,107,254,.12) ≈ 4.65:1；直接用 #4D6BFE 只有 4.38:1）。 */
+      .upd-btn--dsh {
+        background: rgba(77, 107, 254, 0.12);
+        color: #3a56d8;
+      }
+
+      :root[data-theme='dark'] .upd-btn--dsh {
+        background: rgba(77, 107, 254, 0.22);
+        color: #8b9dff;
+      }
+
+      .upd-btn--dsh.is-hover {
+        background: rgba(77, 107, 254, 0.22);
+      }
+
+      :root[data-theme='dark'] .upd-btn--dsh.is-hover {
+        background: rgba(77, 107, 254, 0.34);
+      }
+
+      .upd-btn.is-active {
+        filter: brightness(0.94);
+      }
+
+      :root[data-theme='dark'] .upd-btn.is-active {
+        filter: brightness(1.18);
+      }
+
+      /* 下载中进度态：文字变「下载中 N%」，点击可弹框取消。
+         与静态的「更新」按钮同底色但字重更实——是「正在发生的事」而非「待办」，
+         两者的视觉层级因此不同，用户一眼能分清该点哪个。 */
+      .upd-btn--client.is-downloading {
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 停滞态：底色转为更淡的灰蓝（不再是「一切正常的天蓝」），并加一次极轻的
+         呼吸动画。与 is-downloading 的区别是语义上的——「正在下」vs「不对劲」，
+         两者如果只靠文案区分，横幅降级后用户就失去了唯一的状态线索。 */
+      .upd-btn--client.is-downloading.is-stalled {
+        background: rgba(100, 116, 139, 0.16);
+        color: #475569;
+        animation: upd-stalled 1.6s ease-in-out infinite;
+      }
+
+      :root[data-theme='dark'] .upd-btn--client.is-downloading.is-stalled {
+        background: rgba(148, 163, 184, 0.18);
+        color: #cbd5e1;
+      }
+
+      @keyframes upd-stalled {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.62;
+        }
+      }
+
       /* 窄窗口：省掉 ¥ 符号位，保住金额与 WCO 三键的间距 */
       @media (max-width: 540px) {
         .balance-badge .bb-symbol {
@@ -343,13 +531,26 @@
     <div class="title">DSH Desktop</div>
     <button class="settings-btn" id="settings-btn" title="设置" aria-label="设置">设置</button>
     <button class="help-btn" id="help-btn" title="帮助" aria-label="帮助">帮助</button>
-    <!-- DeepSeek 余额徽章：位于帮助按钮右侧，悬停出明细 tooltip，点击手动刷新。
-         骨架仅为首帧 loading 占位，内容由脚本按状态重建（图标 + 文案） -->
-    <div class="bb-wrap" id="bb-wrap">
-      <button class="balance-badge" id="balance-badge" type="button" data-status="loading" aria-label="DeepSeek 余额，点击刷新">
-        <span class="bb-spin" aria-hidden="true"></span>
-        <span class="bb-text">查询中</span>
+    <!-- 右侧操作区：余额徽章 + 两个「有更新才出现」的更新按钮。
+         按钮文案与显隐由主进程经 titlebar-update-state 推送决定（见文末脚本）；
+         交互态沿用 is-hover / is-active 类名，不用 :hover / :active 伪类
+         （原因见上方帮助/设置按钮注释）。 -->
+    <div class="tb-actions" id="tb-actions">
+      <button class="notice-bell" id="notice-bell" type="button" aria-label="公告">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 8.5a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16s-2-1.5-2-6.5z"/>
+          <path d="M10.5 19a2 2 0 0 0 3 0"/>
+        </svg>
+        <span class="notice-dot" id="notice-dot" hidden></span>
       </button>
+      <div class="bb-wrap" id="bb-wrap">
+        <button class="balance-badge" id="balance-badge" type="button" data-status="loading" aria-label="DeepSeek 余额，点击刷新">
+          <span class="bb-spin" aria-hidden="true"></span>
+          <span class="bb-text">查询中</span>
+        </button>
+      </div>
+      <button class="upd-btn upd-btn--client" id="client-update-btn" type="button" hidden>更新</button>
+      <button class="upd-btn upd-btn--dsh" id="dsh-update-btn" type="button" hidden>更新DSH</button>
     </div>
     <script>
       // 订阅主题变化：更新 <html> 的 data-theme 切换 CSS 变量色板
@@ -470,6 +671,160 @@
             window.dsh.showSettingsMenu({ x: rect.left, y: rect.bottom, width: rect.width })
           }
         })
+      })()
+
+      // ==================== 更新按钮 ====================
+      // 两个按钮的显隐与点击行为都由主进程驱动，本段只做渲染与上报：
+      //   - 首帧主动拉一次状态（标题栏页可能晚于/早于任何一次推送）；
+      //   - 之后订阅 titlebar-update-state；
+      //   - 点击只上报意图，真正的确认框与安装动作全在主进程。
+      // 交互态用 is-hover / is-active 类名（原生对话框弹出期间渲染进程收不到
+      // 鼠标事件，伪类会滞留且标题栏页永远不会自动清除），复位时机：
+      // 窗口失焦/重新聚焦 + 真实 mouseleave/mouseup。
+      ;(function () {
+        var clientBtn = document.getElementById('client-update-btn')
+        var dshBtn = document.getElementById('dsh-update-btn')
+        if (!clientBtn || !dshBtn) return
+
+        function wireInteraction(btn) {
+          btn.addEventListener('mouseenter', function () { btn.classList.add('is-hover') })
+          btn.addEventListener('mouseleave', function () {
+            btn.classList.remove('is-hover')
+            btn.classList.remove('is-active')
+          })
+          btn.addEventListener('mousedown', function () { btn.classList.add('is-active') })
+          btn.addEventListener('mouseup', function () { btn.classList.remove('is-active') })
+        }
+        wireInteraction(clientBtn)
+        wireInteraction(dshBtn)
+
+        // 失焦后鼠标状态不再可信（对话框/菜单抢走输入），聚焦时同样先复位
+        window.addEventListener('blur', function () {
+          clientBtn.classList.remove('is-hover', 'is-active')
+          dshBtn.classList.remove('is-hover', 'is-active')
+        })
+
+        // 提示文案带版本号，鼠标悬停即知可更新到哪一版
+        // downloading 阶段按钮呈进度态：文案变「下载中 N%」，点击可弹框取消
+        // 停滞时追加字节/速度信息——DSH 页进度横幅降级后，标题栏是唯一的进度载体
+        function fmtBytes(b) {
+          if (!b || b < 0) return '--'
+          if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
+          if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'
+          if (b >= 1024) return (b / 1024).toFixed(0) + ' KB'
+          return b + ' B'
+        }
+
+        function render(state) {
+          if (!state || !state.client) {
+            clientBtn.hidden = true
+            dshBtn.hidden = true
+            return
+          }
+          var c = state.client
+          if (c.show) {
+            clientBtn.hidden = false
+            if (c.phase === 'downloading') {
+              clientBtn.textContent = '下载中 ' + c.percent + '%'
+              clientBtn.classList.add('is-downloading')
+              if (c.stalled) {
+                clientBtn.classList.add('is-stalled')
+                clientBtn.title =
+                  '下载已停滞：速度为 0，已下载 ' + fmtBytes(c.transferred) + ' / ' + fmtBytes(c.total) +
+                  '。点击可取消本次下载'
+              } else {
+                clientBtn.classList.remove('is-stalled')
+                clientBtn.title =
+                  '正在下载 v' + (c.version || '') + ' 更新包（已下载 ' +
+                  fmtBytes(c.transferred) + ' / ' + fmtBytes(c.total) +
+                  (c.bytesPerSecond > 0 ? '，' + fmtBytes(c.bytesPerSecond) + '/s' : '') +
+                  '），点击可取消本次下载'
+              }
+            } else {
+              clientBtn.textContent = '更新'
+              clientBtn.classList.remove('is-downloading', 'is-stalled')
+              if (c.phase === 'available') {
+                clientBtn.title = 'DSH Desktop v' + (c.version || '') + ' 可更新，点击下载并安装'
+              } else if (c.phase === 'error') {
+                clientBtn.title = '更新包下载失败，点击可重试或改用浏览器下载'
+              } else if (c.installOnNextLaunch) {
+                clientBtn.title = 'DSH Desktop v' + (c.version || '') + ' 已就绪，下次启动时自动安装'
+              } else {
+                clientBtn.title = 'DSH Desktop v' + (c.version || '') + ' 已下载完成，点击安装'
+              }
+            }
+          } else {
+            clientBtn.hidden = true
+            clientBtn.classList.remove('is-downloading', 'is-stalled')
+          }
+          if (state.dsh && state.dsh.show) {
+            dshBtn.hidden = false
+            dshBtn.textContent = '更新DSH'
+            dshBtn.title = 'DSH 运行包有更新 v' + (state.dsh.version || '') + '，点击更新'
+          } else {
+            dshBtn.hidden = true
+          }
+        }
+
+        if (window.dsh && typeof window.dsh.onTitlebarUpdateState === 'function') {
+          window.dsh.onTitlebarUpdateState(render)
+        }
+        if (window.dsh && typeof window.dsh.getTitlebarUpdateState === 'function') {
+          window.dsh.getTitlebarUpdateState().then(render).catch(function () { /* 无更新时按隐藏处理 */ })
+        }
+
+        clientBtn.addEventListener('click', function () {
+          if (window.dsh && typeof window.dsh.clientUpdateClicked === 'function') {
+            window.dsh.clientUpdateClicked()
+          }
+        })
+        dshBtn.addEventListener('click', function () {
+          if (window.dsh && typeof window.dsh.dshUpdateClicked === 'function') {
+            window.dsh.dshUpdateClicked()
+          }
+        })
+      })()
+
+      // ==================== 公告铃铛 ====================
+      // 拉取与展示全在主进程（notice.ts 编排），本页只做两件事：
+      // 1) 渲染未读红点（首帧主动拉一次状态，避免早于/晚于推送导致红点错位）
+      // 2) 点击即通知主进程立即拉一次并展示
+      ;(function () {
+        var bell = document.getElementById('notice-bell')
+        var dot = document.getElementById('notice-dot')
+        if (!bell || !dot) return
+
+        function render (state) {
+          var unread = state && typeof state.unread === 'number' ? state.unread : 0
+          dot.hidden = unread <= 0
+          bell.setAttribute(
+            'aria-label',
+            unread > 0 ? '公告（' + unread + ' 条未读）' : '公告'
+          )
+          bell.title = unread > 0 ? '公告（' + unread + ' 条未读）' : '公告'
+        }
+
+        // 交互态用类名而非伪类，原因与帮助/设置按钮一致（原生菜单期间收不到鼠标事件）
+        bell.addEventListener('mouseenter', function () { bell.classList.add('is-hover') })
+        bell.addEventListener('mouseleave', function () { bell.classList.remove('is-hover') })
+        bell.addEventListener('mousedown', function () { bell.classList.add('is-active') })
+        bell.addEventListener('mouseup', function () { bell.classList.remove('is-active') })
+        window.addEventListener('blur', function () {
+          bell.classList.remove('is-hover', 'is-active')
+        })
+
+        bell.addEventListener('click', function () {
+          if (window.dsh && typeof window.dsh.noticeRefresh === 'function') {
+            window.dsh.noticeRefresh()
+          }
+        })
+
+        if (window.dsh && typeof window.dsh.getNoticeState === 'function') {
+          window.dsh.getNoticeState().then(render).catch(function () { render({ unread: 0 }) })
+        }
+        if (window.dsh && typeof window.dsh.onNoticeState === 'function') {
+          window.dsh.onNoticeState(render)
+        }
       })()
 
       // ==================== DeepSeek 余额徽章 ====================

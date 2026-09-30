@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "notices": [
+    {
+      "id": "2026-09-30-client-1-0-17",
+      "type": "modal",
+      "level": "info",
+      "title": "DSH Desktop 1.0.17 已发布",
+      "body": "本次更新把全部弹窗统一成磨砂玻璃风格，并新增公告功能——以后服务公告、维护通知会直接显示在客户端里，不需要为了改一句话而发新版本。",
+      "link": { "label": "查看更新日志", "url": "https://github.com/ycowner/deepseek-harness-desktop/releases" },
+      "startsAt": "2026-09-30T00:00:00Z",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "dismissible": true
+    },
+    {
+      "id": "2026-09-30-maint-1004",
+      "type": "banner",
+      "level": "warning",
+      "title": "今晚 02:00–04:00 服务维护",
+      "body": "维护期间 DSH 服务会短暂不可用，正在进行的会话会中断。\n其余功能不受影响。",
+      "link": { "label": "查看详情", "url": "https://example.com/status" },
+      "startsAt": "2026-09-30T00:00:00Z",
+      "expiresAt": "2026-10-01T06:00:00Z",
+      "dismissible": true
+    },
+    {
+      "id": "2026-09-30-forced-upgrade",
+      "type": "banner",
+      "level": "error",
+      "title": "请升级到 1.0.17",
+      "body": "当前版本存在已知问题，请先点击标题栏的「更新」完成升级。\n此公告在升级后自动消失。",
+      "dismissible": false
+    }
+  ]
+}
