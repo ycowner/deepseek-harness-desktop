@@ -28,7 +28,12 @@
 | --- | --- |
 | `DSH-Desktop-Setup-1.0.18.exe` | Windows x64 安装程序，需以管理员权限运行 |
 
-**安装包校验值**：打包完成后回填（字节数 / SHA256 / SHA512 base64）。
+**安装包校验值**（263,545,447 字节）：
+
+| 算法 | 值 |
+| --- | --- |
+| SHA256 | `f4e4c8362c59022d08c35b9dd0caa4147cf67508b6f144b498bc0251c64b3122` |
+| SHA512 (base64) | `rmjtzS1G2viLGaMzHZ2CfaSuZpZ8NT/tjl4oEDD8bMkKSOirGoIDI44e2cBmZcpWfIq1c218m4c+abpynbREAg==` |
 
 > 客户端无接口、协议与存储格式变更，配置与数据完全兼容，建议直接覆盖升级。出厂预装的 DSH 运行包版本本次未变（0.2.0-rc.2），已装用户随时可用「更新DSH」切到上游最新版。
 
