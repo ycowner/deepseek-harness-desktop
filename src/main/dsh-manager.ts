@@ -1,4 +1,4 @@
-import { spawn, execSync, type ChildProcess } from 'child_process'
+import { spawn, execFile, type ChildProcess } from 'child_process'
 import { createServer, type Server } from 'net'
 import { get } from 'http'
 import { join } from 'path'
@@ -605,12 +605,22 @@ export async function stopDsh(dshProcess?: DshProcess): Promise<void> {
 
   // Windows 下使用 taskkill 强制终止整个进程树
   if (process.platform === 'win32') {
-    try {
-      execSync(`taskkill /pid ${pid} /f /t`, { stdio: 'ignore' })
+    // 异步执行：execSync 会同步阻塞主进程直至 taskkill 返回。
+    // 更新流程里这段紧挨着 activateDshPackage，是「未响应」的两大来源之一
+    // （见 AGENTS.md §12）。用参数数组形式，与 dsh-repair 的超时清理保持一致。
+    const taskkillError = await new Promise<string | null>((resolve) => {
+      execFile(
+        'taskkill',
+        ['/pid', String(pid), '/f', '/t'],
+        { windowsHide: true, timeout: 30_000 },
+        (err) => resolve(err ? err.message : null)
+      )
+    })
+    if (taskkillError === null) {
       console.log(`[DSH] 已通过 taskkill 终止进程树 PID=${pid}`)
-    } catch (err) {
+    } else {
       // 进程可能已退出，忽略错误
-      console.warn(`[DSH] taskkill 失败（进程可能已退出）: ${(err as Error).message}`)
+      console.warn(`[DSH] taskkill 失败（进程可能已退出）: ${taskkillError}`)
     }
   } else {
     // 非 Windows：发送 SIGTERM 后再 SIGKILL

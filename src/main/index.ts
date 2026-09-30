@@ -2,7 +2,7 @@ import { app, BrowserWindow, WebContentsView, Menu, shell, ipcMain, nativeImage,
 import { join } from 'path'
 import type { DshDialogOptions } from './dsh-dialog'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
-import { prepareDshPackage, activateDshPackage, repairDsh } from './dsh-repair'
+import { prepareDshPackage, activateDshPackage, repairDsh, discardRetiredDshDir } from './dsh-repair'
 import { getBundledRuntimeInfo } from './node-binary'
 import { checkForUpdate, getInstalledDshVersion, isValidVersion, compareVersions } from './dsh-version'
 import { checkForAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, UPDATE_FEED_URL } from './app-update'
@@ -1500,9 +1500,13 @@ function startPeriodicDshUpdateCheck(): void {
 /**
  * 执行 DSH 更新流程
  *
- * 两阶段：先 prepare（下载+校验+安装到 staging，旧 DSH 继续运行），
- * 再 stopDsh → activate（rm + rename，毫秒级不可用窗口），最后 startDsh。
+ * 两阶段：先 prepare（下载+校验+npm 直接装进 dsh-cache/dsh.new.<ts>/，旧 DSH 继续运行），
+ * 再 stopDsh → activate（两次同卷 rename，毫秒级不可用窗口，不做删除），最后 startDsh；
+ * UI 就绪后再异步回收旧版本目录（dsh.old.<ts>）。
  * 全程受 isUpdating 互斥保护，防止并发触发与临时目录互踩。
+ *
+ * 这条链路上的每一步都不得出现重量级同步 fs / exec 调用：Electron 主进程是单线程，
+ * 主线程被占会让窗口收不到 WM_PAINT，Windows 约 5 秒即判「未响应」（详见 AGENTS.md §12）。
  *
  * 更新成功后同时复位 pendingDshUpdateVersion 与 lastPromptedDshVersion，
  * 避免镜像滞后场景下用户被同一版本永久抑制（详见方案报告 #20）。
@@ -1519,13 +1523,16 @@ async function performUpdate(): Promise<void> {
     loadLoadingPage()
     sendStatus('正在下载最新版本 DSH 包...')
 
-    // 阶段一：下载+校验+安装到 staging（旧 DSH 不受影响，继续对外服务）
+    // 阶段一：下载+校验+安装到 dsh.new.<ts>/（旧 DSH 不受影响，继续对外服务）
     const prepared = await prepareDshPackage((msg: string) => sendStatus(msg))
 
-    // 阶段二：先停后换（Windows 下 native 模块会锁定缓存目录，必须先停进程）
+    // 阶段二：先停后换（顺序约束见 AGENTS.md §12 第 13 条）。
+    // activate 是两次同卷 rename（毫秒级、不做删除），旧目录换名成 dsh.old.<ts> 让位。
+    // 传入 sendStatus：rename 被安全软件占用时会退避重试（累计约 15.75s），
+    // 期间必须给用户进度反馈，否则看起来像卡死（见 AGENTS.md §12 第 50 条）
     sendStatus('下载完成，正在切换 DSH 版本...')
     await stopDsh()
-    activateDshPackage(prepared.stagingDir)
+    const { retiredDir } = await activateDshPackage(prepared.preparedDir, sendStatus)
 
     sendStatus('更新完成，正在重启 DSH 服务...')
     const dshProcess = await startDsh()
@@ -1547,6 +1554,12 @@ async function performUpdate(): Promise<void> {
       // 更新窗口标题
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
     }
+
+    // UI 已就绪后再回收旧版本目录：那棵树约 453MB / 2.6 万文件，同步删会把主线程
+    // 堵住十几秒、窗口被判「未响应」。放在 loadURL 之后用异步删除，对用户零感知，
+    // 也不会跟 DSH 启动抢 I/O。失败只记日志，残留由下次 prepare 前的清扫兜底。
+    // 注意：本行只在成功路径执行；失败时 dsh.old.* 保留，留给用户手工回滚。
+    void discardRetiredDshDir(retiredDir)
 
     // DSH 运行包已更新，清除待安装标记并复位抑制计数（避免镜像滞后时该版本永不再提示）
     pendingDshUpdateVersion = null

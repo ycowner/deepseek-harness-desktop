@@ -66,7 +66,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   ├── main/                    ← 主进程
 │   │   ├── index.ts             ← 应用入口、窗口（WCO 标题栏 + 内容子视图）、IPC 路由、帮助菜单、模态框注入
 │   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）
-│   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare staging / activate）
+│   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare 装进 dsh.new.<ts>/ / activate 两次 rename + 就绪后异步回收）
 │   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询、npm 双源并行取最大、GitHub 上游版本信息查询（仅手动检查告知）
 │   │   ├── app-update.ts        ← 客户端更新元数据检查（拉 {publish.url}/latest.yml、版本比较、清单文件名净化）+ 遗留安装包清理
 │   │   ├── auto-updater.ts      ← 客户端自动下载/安装（electron-updater 单例封装、状态机、进度节流、提示后安装决策）
@@ -659,10 +659,12 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
     - 去掉 `--no-open` 会导致用户启动桌面应用时同时弹出系统默认浏览器，破坏"只开 Electron 窗口"的产品行为。
     - 加回非常容易（`grep '\\-\\-no-open' src/main/dsh-manager.ts`），但回退前先确认用户体验影响。
 13. **不要在 `performUpdate()` 里先 `stopDsh` 再 `prepareDshPackage`**。
-    - 顺序约束：`prepare`（下载+完整性校验+安装到 staging）→ `stopDsh`（释放缓存目录锁）→ `activate`（rm 旧缓存 + rename staging，毫秒级窗口）→ `startDsh`。颠倒顺序会导致 Windows 下 `rmSync(targetDir)` 遇到运行中的 native 模块（node-pty 等 .node 文件）抛 EPERM，更新必然失败。
+    - 顺序约束：`prepare`（下载+完整性校验+**npm 直接装进 `dsh-cache/dsh.new.<ts>/`**）→ `stopDsh`（释放缓存目录锁）→ `activate`（两次同卷 rename，毫秒级窗口）→ `startDsh` → （UI 就绪后）异步回收 `dsh.old.<ts>`。颠倒顺序会让仍被 DSH 进程锁定的目录参与 rename，更新必然失败。
     - 同样，`repairDsh`（错误页流程）只能用于 DSH 未运行的场景；运行中版本更新必须手动调用 `prepare` + `activate`。
+    - `activateDshPackage` 现在**不做常规删除**，只做 `dsh → dsh.old.<ts>` 与 `dsh.new.<ts> → dsh` 两次 rename。旧目录的删除放在 `performUpdate` 成功路径上，由 `discardRetiredDshDir(retiredDir)` 在 `loadURL` 之后异步完成。**不要把删除塞回 `activate`**——那会重新引入主线程阻塞（见第 49 条）。
+    - 两条 rename 都走 `renameWithRetry`（退避重试，累计约 15.75s），且 activate 内部会**复查目标目录是否真的消失**，不满足则用 `fsp.rm` 异步兜底删除。激活失败时自动把 `dsh.old.*` 换回 `dsh` 回滚（回滚同样带重试）。改动这条链路前先读第 50 条。
 14. **不要绕过 `isUpdating` / `isRepairing` 互斥锁直接调用更新/修复流程**。
-    - 共享 staging / target 目录的并发调用会互踩（`rmSync`/`renameSync` 互相干扰），造成缓存损坏。双击标题栏「更新DSH」按钮、错误页重复点修复按钮都可能产生并发。
+    - 共享 `dsh.new.*` / `dsh` / `dsh.old.*` 目录的并发调用会互踩（两次 `renameSync` 交错会导致缓存错位），造成缓存损坏。双击标题栏「更新DSH」按钮、错误页重复点修复按钮都可能产生并发。
 15. **不要将远端版本号直接拼入文件路径 / URL / JS 模板**。
     - 远端 `tag_name` 拼接前必须过 `isValidVersion()` 白名单（`/^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$/`）。这是纵深防御，git 标签命名规则是第一道防线；手动检查不要跳过。
 16. **不要让 IPC handler 脱离 `isTrustedSender(event)` 校验**。
@@ -767,6 +769,18 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 46. **不要放松 `notice.ts` 的校验，也不要改成"部分渲染"**。公告内容来自远端、会渲染进页面，`parseNotices` 的任一条拒绝都是**整批丢弃**的——这是刻意的（半截公告比没有公告更糟），不是 bug。`javascript:` / `data:` 链接被挡、外链只走 `open-external`、正文只 `textContent`，三条都由 `scripts/preview-notice.js` 的生成期断言守着；改校验必须同步改断言，并确认新断言真的会拒（拿一个反例喂给它）。
 47. **不要给公告横幅写死 `top`**。它必须运行时读 `#dsh-ub` 的 `offsetHeight`：客户端更新下载中时更新横幅占据顶部，公告要下移避让。写死 0 会让两条横幅重叠。两条注入刻意不共享状态——靠读对方实际布局避让，加一个共享变量就多了一处可能失配的地方。
 48. **不要把公告拉取失败当成错误弹给用户**。启动与周期路径必须静默（网络不通是常态，每次开应用弹窗报错是灾难）；只有用户主动点标题栏铃铛才弹。另外 `fetchNotices` 把 404 当成「没有公告」——发布顺序上客户端完全可能先于 `notifications.json` 上线，那不是错误。
+49. **不要为了"不阻塞主线程"把大目录的同步拷贝换成 `fs.promises.cp`**。
+    - 实测（本机 2026-09-30，Windows，6,640 个小文件）：`cpSync` 4.6s vs `fs.promises.cp` 9.8s——**异步版慢约一倍**。`fsp.cp` 走 JS 层实现，比 `cpSync` 的原生快路径慢得多。换成异步只是把"卡住"变成"更卡"。
+    - 正确解法是**让产物原地就位、消除拷贝**：`dsh-repair` 现在把 npm 的 cwd 直接设为 `dsh-cache/dsh.new.<ts>/`，node_modules 天然就在最终位置，激活只需两次同卷 `rename`。判断标准先看文件数——本例 26,617 个依赖文件里，真正需要搬的包本体只有 20 个（0.08%），把树搬对不如把树留在原地。
+    - 删除则相反：要用 `fs.promises.rm`（走 libuv 线程池，真不阻塞），但仍要避免同步 `rmSync`；且对"刚写完的目录"做 rename/delete 还要加退避重试（见第 50 条）。
+    - 背景阈值：Electron 主进程是单线程，同步 fs/exec 超过约 5 秒（Windows 判定窗口无响应的阈值）用户就会看到标题栏出现「未响应」，且标题栏与 loading 页动画一起冻住。更新/修复链路上新增任何重量级 fs 或 exec 调用前，先问它会作用在多少个文件上。
+50. **不要直接对"刚写完的大目录"做 `rename` / `delete`，必须重试退避**。
+    - 实测（本机 2026-09-30，Windows，更新 DSH 到 0.2.0-rc.2）：`activateDshPackage` 的第二条 rename（`dsh.new.<ts>` → `dsh`，2.6 万个文件、npm 刚写完几秒）必然报 `EPERM: operation not permitted, rename`，**而同一次调用里第一条 rename（搬走几天前就写好的旧 `dsh` 树）却成功了**——这个反差是定位的关键信号。
+    - 根因：Windows 上安全软件的文件系统过滤驱动（本机是**腾讯电脑管家系统防护**接管了实时防护，Defender 实际已关闭；其 `QQSysMonX64_EV.sys` / `TSSysKit64_EV.sys` 等 4 个内核驱动 Running）会扫描新写入的文件，并以**不带 `FILE_SHARE_DELETE`** 的方式持有句柄，此时 `MoveFileEx` 必被拒。占用是**瞬时**的，扫描走完即释放。
+    - 处理：`dsh-repair.renameWithRetry` 对 `EPERM` / `EACCES` / `EBUSY` 退避重试（250ms→8s，累计约 15.75s，7 次），`EXDEV` / `ENOENT` 这类确定性错误立即抛出不浪费等待。等待用 `setTimeout` 异步实现，**主线程空闲所以不会变成「未响应」**；同时把 `uiLabel` 推进度提示，否则用户会以为卡死。
+    - **不要用 `existsSync` 当唯一门禁**：它只是快判。让位旧目录之后必须**复查目标是否真的消失**，不满足就用 `fsp.rm` 异步兜底删除再 rename——否则目标残留会让后续 rename 报同一个 EPERM，而两种成因在错误码上完全无法区分。
+    - **不要把 `child.on('exit')` 改成等 `close`** 来"确保 npm 彻底结束"：npm 会 spawn 继承 stdio 的孙进程（如 node-gyp），`close` 可能迟迟不触发，改了会让「npm 已成功但 Promise 挂到 300s 超时 → 误报安装超时」，比原问题更糟。等一等交给重试即可。
+    - 这类失败不会在控制台留下痕迹（打包版无控制台），**必须接入 `update-diag`**：`dsh-prep` / `dsh-rename` / `dsh-act` 三个标签会落盘到 `%APPDATA%\<userData>\logs\update-diag.log`（开发模式 userData 是 `dsh-web-desktop`，打包版是 `DSH Desktop`）。没有它就只能靠猜。
 
 ### 12.2 改之前要确认
 

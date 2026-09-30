@@ -1,11 +1,13 @@
 import { net } from 'electron'
 import { existsSync, mkdirSync, rmSync, renameSync, createWriteStream, createReadStream, writeFileSync, readdirSync, copyFileSync, unlinkSync, type Dirent } from 'fs'
+import { promises as fsp } from 'fs'
 import { createHash } from 'crypto'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { spawn, execFileSync } from 'child_process'
 import { getNodeBinaryPath, getNodeDir, getBundledNodeVersion } from './node-binary'
 import { fetchLatestVersion, fetchDistIntegrity } from './dsh-version'
+import { diag } from './update-diag'
 
 /**
  * DSH 在线修复 / 更新模块
@@ -17,12 +19,18 @@ import { fetchLatestVersion, fetchDistIntegrity } from './dsh-version'
  * 该目录会被 dsh-manager.ts 中的 findCachedDshEntry 优先识别。
  *
  * 两阶段设计（关键约束，见 AGENTS.md §12）：
- * 1. prepareDshPackage：下载 + 完整性校验 + npm 安装 + 复制到 staging 目录
- *    （dsh-cache/dsh.staging.<ts>/），全程不触碰现有 dsh/ 缓存目录，
+ * 1. prepareDshPackage：下载 + 完整性校验 + **npm 直接装进 dsh-cache/dsh.new.<ts>/**
+ *    + 把 DSH 包本体上提到目录根（20 个文件）。全程不触碰现有 dsh/ 缓存目录，
  *    因此更新期间旧 DSH 进程可以继续运行；
- * 2. activateDshPackage：rm 旧缓存 + rename staging，不可用窗口仅毫秒级。
- *    调用方负责在 activate 之前停止 DSH 进程——Windows 下运行中的
- *    native 模块（node-pty 等 .node 文件）会锁定缓存目录导致 rmSync EPERM。
+ * 2. activateDshPackage：两次同卷 rename（dsh → dsh.old.<ts>，dsh.new.<ts> → dsh），
+ *    不做任何删除，不可用窗口仅毫秒级。调用方负责在 activate 之前停止 DSH 进程。
+ *    旧目录的实际删除推迟到 DSH 启动就绪之后，由 discardRetiredDshDir 异步完成。
+ *
+ * 为什么要这样拆（实测数据见 AGENTS.md §12）：依赖树 26,617 个文件 / 453MB，
+ * 而真正需要搬动的 DSH 包本体只有 20 个文件 / 0.07MB。任何"把大树同步拷/删
+ * 一遍"的做法都会把 Electron 主线程堵住十几秒，Windows 随即把窗口判为
+ * 「未响应」（约 5 秒无消息即触发）。因此这里的原则是：
+ * **让产物原地就位，用 rename 换位，绝不在主线程上删大树。**
  */
 
 // npm registry 地址
@@ -301,6 +309,14 @@ function installDshFromTarballWithRegistry(
 
 /**
  * 递归复制目录（同 preinstall-dsh.js 中的逻辑）
+ *
+ * **刻意保持同步实现，不要"顺手"换成 `fs.promises.cp`**：
+ * 实测（本机，2026-09-30）在大量小文件场景下 `fsp.cp` 反而比 `cpSync` 慢约一倍
+ * （6,640 文件：cpSync 4.6s vs fsp.cp 9.8s），换过去只是把瓶颈从"阻塞"换成"更慢"。
+ * 本函数现在只用于把 `@deepseek-ai/dsh` 包本体上提到新目录根——实测仅 20 个文件
+ * / 0.07 MB，同步成本可忽略。真正的大头（26,617 文件的 node_modules）已由
+ * prepareDshPackage 改为「npm 直接装到目标目录、原地就位」而不再需要拷贝。
+ * 详见 AGENTS.md §12。
  */
 function copyDir(src: string, dest: string): void {
   if (!existsSync(src)) return
@@ -390,44 +406,71 @@ function assertNativeModulesLoadable(installDir: string): void {
 }
 
 /**
- * 清扫缓存目录中残留的 staging / tmp / abi-broken 目录（上次更新、修复中断
- * 或启动自愈失效坏缓存的产物）
+ * 清扫缓存目录中残留的 staging / tmp / abi-broken / old 目录
+ * （上次更新、修复中断，或启动自愈失效坏缓存的产物）
+ *
+ * **异步实现**：这里删的可能是一棵 2.6 万文件 / 453MB 的目录（`dsh.old.*`），
+ * 同步 `rmSync` 会把主线程堵住十几秒，Windows 随即把窗口判为「未响应」。
+ * `fsp.rm` 走 libuv 线程池，await 期间主线程照常处理消息。
+ *
+ * 前缀覆盖：`dsh.new.`（prepare 中断的半成品）、`dsh.old.`（已换下但没删掉的
+ * 旧版本）、`dsh.staging.`（历史命名）、`dsh.tmp`、`dsh.abi-broken.`。
+ *
+ * 调用时机固定在 prepare 开头且持有 isUpdating 互斥锁的位置，不存在与另一条
+ * 更新并发互踩的可能（见 AGENTS.md §12 关于互斥锁的约束）。
  */
-function cleanupStaleStagingDirs(): void {
+async function cleanupStaleStagingDirs(): Promise<void> {
   const cacheDir = getDshRepairCacheDir()
+  const STALE_PREFIXES = ['dsh.new.', 'dsh.old.', 'dsh.staging.', 'dsh.abi-broken.']
   try {
-    for (const entry of readdirSync(cacheDir, { withFileTypes: true })) {
-      if (entry.isDirectory() && (entry.name.startsWith('dsh.staging.') || entry.name === 'dsh.tmp' || entry.name.startsWith('dsh.abi-broken.'))) {
-        try {
-          rmSync(join(cacheDir, entry.name), { recursive: true, force: true })
-          console.log(`[DSH Repair] 清理残留目录: ${entry.name}`)
-        } catch { /* 忽略单个失败 */ }
+    const entries = await fsp.readdir(cacheDir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const isStale = STALE_PREFIXES.some((p) => entry.name.startsWith(p)) || entry.name === 'dsh.tmp'
+      if (!isStale) continue
+      try {
+        await fsp.rm(join(cacheDir, entry.name), { recursive: true, force: true })
+        console.log(`[DSH Repair] 清理残留目录: ${entry.name}`)
+      } catch (err) {
+        // 单个目录清理失败（如被杀毒软件占用）不影响其余残留的清扫
+        console.warn(`[DSH Repair] 清理残留目录失败 ${entry.name}: ${(err as Error).message}`)
       }
     }
-  } catch { /* 忽略 */ }
+  } catch (err) {
+    console.warn(`[DSH Repair] 读取缓存目录失败，跳过残留清扫: ${(err as Error).message}`)
+  }
 }
 
 /**
  * prepareDshPackage 的产物
  */
 export interface PreparedDshPackage {
-  /** 完整构建并校验过的 staging 目录（尚未激活） */
-  stagingDir: string
+  /** 完整构建并校验过的待激活目录（dsh-cache/dsh.new.<ts>/，尚未激活） */
+  preparedDir: string
   /** 本次准备的 DSH 版本号 */
   version: string
 }
 
 /**
- * 阶段一：准备新版 DSH 包（下载 → 完整性校验 → npm 安装 → 复制到 staging）
+ * 阶段一：准备新版 DSH 包（下载 → 完整性校验 → npm 安装 → 包体上提）
  *
  * 流程：
  * 1. 获取最新版本号（优先国内镜像 npmmirror，失败回退 npm registry）
  * 2. 下载 tgz 到临时目录（双源）
  * 3. 用 npm dist.integrity（sha512）校验 tgz 完整性
- * 4. 在空目录跑 `npm install <tgz>`（不能在 DSH 包目录里跑，详见
- *    installDshFromTarball 注释），npm 解压 tgz 并安装全部 dependencies
+ * 4. **npm 直接装进 `dsh-cache/dsh.new.<ts>/`**（同卷、用户可写），产出
+ *    `dsh.new.<ts>/node_modules/` 与 `dsh.new.<ts>/node_modules/@deepseek-ai/dsh/`
  * 5. 校验安装产物（lib/bin.js 存在）
- * 6. 复制到 staging 目录 dsh-cache/dsh.staging.<ts>/
+ * 6. 只把 `@deepseek-ai/dsh` 包本体（实测 20 个文件 / 0.07MB）上提到目录根，
+ *    使 `dsh.new.<ts>/` 的布局与正式缓存 `dsh/` 完全一致
+ * 7. 返回待激活目录，由调用方择机 activate
+ *
+ * **为什么 npm 直接装进缓存目录（不要改回 TEMP 再拷）**：
+ * 依赖树有 26,617 个文件 / 453MB，而需要搬运的包本体只占 0.08%。装在
+ * `%TEMP%` 再 copyDir 过来需要主线程同步拷贝 2.6 万个文件（实测 cpSync 推算
+ * ~18.6s），Windows 约 5 秒无消息即把窗口判为「未响应」。原地安装后
+ * node_modules 已经就位，**这次拷贝整个消失**。附带收益：磁盘峰值从
+ * ~900MB（临时装 + 缓存各一份）降到 ~460MB。
  *
  * 注意：不复用旧缓存的 node_modules。实测 npm arborist 对复用旧树做增量 diff 时
  * 会产出不完整依赖树（0.1.2-rc.1：sharp 升到 0.35.4 但其常规依赖 @img/colour
@@ -435,10 +478,10 @@ export interface PreparedDshPackage {
  * 内容缓存已足够快（实测 24 秒）。
  *
  * 全程不触碰现有 dsh/ 缓存目录，更新期间旧 DSH 进程可继续运行。
- * 失败时清理 staging 与临时目录，现有缓存不受影响。
+ * 失败时清理新目录与临时目录，现有缓存不受影响。
  *
  * @param onProgress 进度回调（文字描述当前步骤）
- * @returns staging 目录与版本号，由调用方择机 activate
+ * @returns 待激活目录与版本号，由调用方择机 activate
  */
 export async function prepareDshPackage(
   onProgress?: (msg: string) => void
@@ -453,24 +496,36 @@ export async function prepareDshPackage(
     throw new Error('内置 Node.js 不存在，无法安装 DSH 包')
   }
 
-  // 清扫上次更新/修复中断残留的 staging 目录
-  cleanupStaleStagingDirs()
+  // 清扫上次更新/修复中断残留的 staging / old 目录（异步，不阻塞主线程）
+  await cleanupStaleStagingDirs()
 
   // 1. 获取最新版本
   report('正在获取最新版本号...')
   const version = await fetchLatestVersion()
   report(`最新版本: ${version}`)
+  diag('dsh-prep', `开始准备，目标版本 v${version}`)
 
-  // 2. 准备临时目录
+  // 2. 准备临时目录（只放 tgz）与待激活目录
   const tempDir = join(tmpdir(), `dsh-repair-${Date.now()}`)
   mkdirSync(tempDir, { recursive: true })
   const tgzPath = join(tempDir, `dsh-${version}.tgz`)
-  // npm install 的 cwd：必须是空目录，让 npm 把 tgz 当作要安装的包（而非项目根）
-  const installDir = join(tempDir, 'install-root')
-  mkdirSync(installDir, { recursive: true })
 
   const cacheDir = getDshRepairCacheDir()
-  const stagingDir = join(cacheDir, `dsh.staging.${Date.now()}`)
+  // npm install 的 cwd：必须是空目录，让 npm 把 tgz 当作要安装的包（而非项目根）；
+  // 直接建在缓存目录内，保证后续 rename 激活时同卷可用
+  const preparedDir = join(cacheDir, `dsh.new.${Date.now()}`)
+  mkdirSync(preparedDir, { recursive: true })
+  diag('dsh-prep', `待激活目录（npm 的 cwd）已建: ${preparedDir}`)
+
+  // 2.1 预检查缓存目录可写：在跑 30 秒的 npm install 之前就发现权限问题
+  try {
+    const testFile = join(preparedDir, '.write-test')
+    writeFileSync(testFile, '')
+    unlinkSync(testFile)
+  } catch {
+    try { rmSync(preparedDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+    throw new Error('缓存目录不可写，无法保存 DSH 包。请检查磁盘空间或权限设置。')
+  }
 
   try {
     // 3. 下载 tgz（优先国内镜像，失败回退 npm registry）
@@ -504,13 +559,16 @@ export async function prepareDshPackage(
     const integrity = await fetchDistIntegrity(version)
     await verifyFileIntegrity(tgzPath, integrity)
     report('完整性校验通过')
+    diag('dsh-prep', 'tgz 下载完成，sha512 完整性校验通过')
 
     // 5. 在空目录跑 npm install <tgz>（不复用旧 node_modules，原因见函数注释）
     report('正在安装 DSH 包及其依赖...')
-    await installDshFromTarball(tgzPath, installDir, report)
+    const installStartedAt = Date.now()
+    await installDshFromTarball(tgzPath, preparedDir, report)
+    diag('dsh-prep', `npm install 完成，用时 ${Date.now() - installStartedAt}ms（npm 的 cwd 即待激活目录，安装完立刻可能被安全软件扫描占用）`)
 
     // 6. 校验 npm install 产物
-    const installedDshDir = join(installDir, 'node_modules', '@deepseek-ai', 'dsh')
+    const installedDshDir = join(preparedDir, 'node_modules', '@deepseek-ai', 'dsh')
     if (!existsSync(installedDshDir) || !existsSync(join(installedDshDir, 'lib', 'bin.js'))) {
       throw new Error('npm install 后未找到 DSH 包或 lib/bin.js，安装异常')
     }
@@ -518,35 +576,30 @@ export async function prepareDshPackage(
 
     // 6.5 校验本地源码编译的原生模块能被内置 Node 加载（防 ABI 不匹配激活坏缓存）
     report('正在校验原生模块 ABI 兼容性...')
-    assertNativeModulesLoadable(installDir)
+    assertNativeModulesLoadable(preparedDir)
 
-    // 7. 复制到 staging 目录（不触碰现有 dsh/ 缓存）
-    report('正在准备新版本缓存...')
-    copyDir(installedDshDir, stagingDir)
-
-    // 预检查缓存目录可写（在复制 node_modules 之前发现权限问题）
-    try {
-      const testFile = join(stagingDir, '.write-test')
-      writeFileSync(testFile, '')
-      rmSync(testFile)
-    } catch {
-      throw new Error('缓存目录不可写，无法保存 DSH 包。请检查磁盘空间或权限设置。')
-    }
-
-    // 复制 node_modules 依赖（含 @deepseek-ai/dsh-* 等所有运行时依赖）
-    const installedNodeModules = join(installDir, 'node_modules')
-    copyDir(installedNodeModules, join(stagingDir, 'node_modules'))
+    // 7. 把 DSH 包本体上提到目录根，使 preparedDir 的布局与正式缓存 dsh/ 一致
+    //    （package.json + lib/ 在根，node_modules/ 为兄弟目录）
+    //    只搬 20 个文件；node_modules 已由 npm 原地装好，不再搬运。
+    report('正在写入新版本缓存...')
+    copyDir(installedDshDir, preparedDir)
 
     report(`新版本 DSH 包已就绪（待激活）: v${version}`)
-    return { stagingDir, version }
+    diag('dsh-prep', `准备完成 v${version}，等待 activate 换位`)
+    return { preparedDir, version }
   } catch (err) {
-    // 准备失败：清理 staging，现有缓存目录不受影响
-    if (existsSync(stagingDir)) {
-      try { rmSync(stagingDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+    // 准备失败：清理新目录，现有缓存目录不受影响。
+    // 必须异步删——失败时新目录里可能已有一棵 26,617 文件的依赖树，同步删会再卡一次窗口
+    if (existsSync(preparedDir)) {
+      try {
+        await fsp.rm(preparedDir, { recursive: true, force: true })
+      } catch {
+        try { rmSync(preparedDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+      }
     }
     throw err
   } finally {
-    // 清理临时下载/安装目录
+    // 清理临时下载目录（新布局下这里只剩 tgz，体积很小）
     try {
       if (existsSync(tempDir)) {
         rmSync(tempDir, { recursive: true, force: true })
@@ -558,30 +611,168 @@ export async function prepareDshPackage(
 }
 
 /**
- * 阶段二：激活 staging 目录为正式缓存（rm 旧缓存 + rename，毫秒级不可用窗口）
- *
- * 调用方必须在此之前停止 DSH 进程——Windows 下运行中的 native 模块
- * 会锁定缓存目录，导致 rmSync 抛 EPERM（更新流程顺序约束见 AGENTS.md §12）。
- * 失败时旧缓存可能已被删除，下次启动将回退到出厂预装版本（dsh-bundled），
- * staging 目录残留由下次 prepare 前的 cleanupStaleStagingDirs 清扫。
- *
- * @param stagingDir prepareDshPackage 返回的 staging 目录
- * @returns 激活后的正式缓存目录路径
+ * activateDshPackage 的产物
  */
-export function activateDshPackage(stagingDir: string): string {
+export interface ActivateDshResult {
+  /** 激活后的正式缓存目录（dsh-cache/dsh） */
+  activeDir: string
+  /** 被换下、待回收的旧版本目录；没有旧目录（首次安装/修复）时为 null */
+  retiredDir: string | null
+}
+
+/**
+ * 可重试的 rename 错误码
+ *
+ * 这三个都是**占用类**瞬时错误：Windows 上安全软件的文件系统过滤驱动
+ * （本机实测为腾讯电脑管家 `QQSysMonX64`）会扫描新写入的文件，并以
+ * 不带 FILE_SHARE_DELETE 的方式持有句柄，此时对目录做 MoveFileEx 必被拒。
+ * 扫描走完句柄即释放，所以「等一下再试」就能过。
+ * EXDEV（跨卷）/ ENOENT 这类是确定性错误，重试没有意义，立即抛出。
+ */
+const RETRIABLE_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+
+/** 退避序列，累计约 15.75s */
+const RENAME_BACKOFF_MS = [250, 500, 1000, 2000, 4000, 8000]
+const RENAME_MAX_ATTEMPTS = RENAME_BACKOFF_MS.length + 1
+
+/**
+ * 带退避重试的 rename（异步）
+ *
+ * 用 `fsp.rename` 而非 `renameSync`：等待期间主线程完全空闲，
+ * 不会重新引入「窗口未响应」（Windows 约 5 秒无消息即判未响应）。
+ *
+ * @param from 源路径
+ * @param to 目标路径
+ * @param uiLabel 人话标签，用于进度提示与诊断日志
+ * @param onProgress 进度回调（重试时推送）
+ */
+async function renameWithRetry(
+  from: string,
+  to: string,
+  uiLabel: string,
+  onProgress?: (msg: string) => void
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await fsp.rename(from, to)
+      diag('dsh-rename', `${uiLabel} 成功（第 ${attempt} 次尝试）${from} -> ${to}`)
+      console.log(`[DSH Repair] ${uiLabel}: ${from} -> ${to}（第 ${attempt} 次尝试）`)
+      return
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException
+      const exhausted = attempt >= RENAME_MAX_ATTEMPTS
+      if (!RETRIABLE_RENAME_CODES.has(e.code ?? '') || exhausted) {
+        diag(
+          'dsh-rename',
+          `${uiLabel} ${exhausted ? '重试耗尽' : '不可重试'}（第 ${attempt}/${RENAME_MAX_ATTEMPTS} 次）` +
+          ` code=${e.code} errno=${e.errno} syscall=${e.syscall} path=${e.path} msg=${e.message}`
+        )
+        // 抛最后一次的原始错误，保持既有错误文案形态
+        throw err
+      }
+      const wait = RENAME_BACKOFF_MS[Math.min(attempt - 1, RENAME_BACKOFF_MS.length - 1)]
+      diag('dsh-rename', `${uiLabel} 遇 ${e.code}（目录可能被占用），${wait}ms 后重试（第 ${attempt}/${RENAME_MAX_ATTEMPTS} 次）`)
+      onProgress?.(`${uiLabel}（目录被占用，正在重试 ${attempt}/${RENAME_MAX_ATTEMPTS - 1}）...`)
+      await new Promise<void>((resolve) => setTimeout(resolve, wait))
+    }
+  }
+}
+
+/**
+ * 阶段二：激活 preparedDir 为正式缓存（两次同卷 rename，毫秒级窗口）
+ *
+ * **不做任何常规删除**：`dsh` 与 `dsh.new.<ts>` 同在 `dsh-cache` 下、同卷，
+ * rename 只是改目录项，因此这一步与「删除 26,637 个文件」相比是毫秒级的。
+ * 旧目录先换名成 `dsh.old.<ts>` 让位，其真正删除推迟到 DSH 启动就绪之后
+ * 由 `discardRetiredDshDir` 异步完成——那 453MB 的删除绝不能占着主线程，
+ * 否则 Windows 会把窗口判为「未响应」。
+ *
+ * **为什么两条 rename 都要重试**：刚被 npm 写完的 `dsh.new.*` 会被安全软件的
+ * 文件系统过滤驱动实时扫描，持有不带 FILE_SHARE_DELETE 的句柄，
+ * 此时 rename 必报 EPERM（实机踩坑：2026-09-30 更新 0.2.0-rc.2 时第一条
+ * rename 成功、第二条被拒，旧版本经回滚完好但更新整体失败）。详见 AGENTS.md §12。
+ *
+ * 调用方必须在此之前停止 DSH 进程（顺序约束见 AGENTS.md §12 第 13 条）：
+ * 运行中的 native 模块会锁定缓存目录。保持"先停后换"能让失败点可控。
+ *
+ * 失败与回滚：第二条 rename 重试耗尽后，尝试把 `dsh.old.*` 换回 `dsh`（同样带重试），
+ * 用户完全无感；回滚也失败才抛错，由调用方走错误页 / 在线修复流程。
+ *
+ * @param preparedDir prepareDshPackage 返回的待激活目录
+ * @param onProgress 进度回调（重试等待期间推送，避免用户以为卡死）
+ * @returns 正式缓存目录与待回收的旧目录
+ */
+export async function activateDshPackage(
+  preparedDir: string,
+  onProgress?: (msg: string) => void
+): Promise<ActivateDshResult> {
   const cacheDir = getDshRepairCacheDir()
   const targetDir = join(cacheDir, 'dsh')
 
-  if (!existsSync(join(stagingDir, 'package.json'))) {
-    throw new Error(`staging 目录无效（缺少 package.json）: ${stagingDir}`)
+  if (!existsSync(join(preparedDir, 'package.json'))) {
+    throw new Error(`准备目录无效（缺少 package.json）: ${preparedDir}`)
   }
 
+  diag('dsh-act', `进入激活 preparedDir=${preparedDir} target=${targetDir}`)
+
+  // 旧目录换名让位（毫秒级，不删除）
+  let retiredDir: string | null = null
   if (existsSync(targetDir)) {
-    rmSync(targetDir, { recursive: true, force: true })
+    retiredDir = join(cacheDir, `dsh.old.${Date.now()}`)
+    await renameWithRetry(targetDir, retiredDir, '正在让位旧版本目录', onProgress)
+  } else {
+    diag('dsh-act', `目标目录不存在，按首次安装/修复处理: ${targetDir}`)
   }
-  renameSync(stagingDir, targetDir)
+
+  // 目标存在性复查：无论上面走没走，让位之后目标都必须不存在。
+  // existsSync 只是快判，安全网在这里——覆盖"门禁漏判 / 目标被重建"这一支。
+  if (existsSync(targetDir)) {
+    diag('dsh-act', '让位后目标仍存在（existsSync 门禁漏判或被重建），执行异步兜底删除')
+    onProgress?.('正在清理残留目录...')
+    await fsp.rm(targetDir, { recursive: true, force: true })
+    diag('dsh-act', `兜底删除完成: ${targetDir}`)
+  }
+
+  // 新目录上位（毫秒级；被占用时自动退避重试）
+  try {
+    await renameWithRetry(preparedDir, targetDir, '正在切换 DSH 版本', onProgress)
+  } catch (err) {
+    // 回滚：把旧目录换回原位，用户完全无感
+    if (retiredDir) {
+      try {
+        await renameWithRetry(retiredDir, targetDir, '正在回滚到旧版本目录', onProgress)
+        diag('dsh-act', '激活失败，已回滚到旧版本目录')
+        retiredDir = null
+      } catch {
+        diag('dsh-act', `回滚失败，旧版本目录仍留在 dsh.old.*，下次启动将回退出厂版本: ${(err as Error).message}`)
+      }
+    }
+    throw err
+  }
+
+  diag('dsh-act', `激活成功 active=${targetDir} retired=${retiredDir ?? '(无)'}`)
   console.log(`[DSH Repair] DSH 包已激活到: ${targetDir}`)
-  return targetDir
+  return { activeDir: targetDir, retiredDir }
+}
+
+/**
+ * 回收被换下的旧版本目录（异步，DSH 启动就绪后调用）
+ *
+ * 用 `fsp.rm` 而非 `fsp.cp` 那套：删除走 libuv 线程池，主线程不被阻塞。
+ * 失败只记 warn——不影响运行，残留由下次 prepare 前的清扫兜底。
+ *
+ * @param retiredDir activateDshPackage 返回的旧目录，null 时直接返回
+ */
+export async function discardRetiredDshDir(retiredDir: string | null): Promise<void> {
+  if (!retiredDir) return
+  try {
+    await fsp.rm(retiredDir, { recursive: true, force: true })
+    console.log(`[DSH Repair] 已清理旧版本目录: ${retiredDir}`)
+  } catch (err) {
+    console.warn(
+      `[DSH Repair] 清理旧版本目录失败（不影响运行，下次更新前兜底清扫）: ${(err as Error).message}`
+    )
+  }
 }
 
 /**
@@ -624,15 +815,18 @@ export async function repairDsh(
   onProgress?: (msg: string) => void
 ): Promise<string> {
   const prepared = await prepareDshPackage(onProgress)
+  let activated: ActivateDshResult
   try {
-    const targetDir = activateDshPackage(prepared.stagingDir)
-    onProgress?.(`修复完成，DSH 包已保存到: ${targetDir}`)
-    return targetDir
+    activated = await activateDshPackage(prepared.preparedDir, onProgress)
   } catch (err) {
-    // 激活失败时清理 staging，避免残留
-    if (existsSync(prepared.stagingDir)) {
-      try { rmSync(prepared.stagingDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
+    // 激活失败时清理待激活目录，避免残留（激活已回滚，retiredDir 已被换回 dsh）
+    if (existsSync(prepared.preparedDir)) {
+      try { await fsp.rm(prepared.preparedDir, { recursive: true, force: true }) } catch { /* 忽略 */ }
     }
     throw err
   }
+  // 错误页场景下 DSH 进程未在运行，此刻直接回收旧目录即可
+  await discardRetiredDshDir(activated.retiredDir)
+  onProgress?.(`修复完成，DSH 包已保存到: ${activated.activeDir}`)
+  return activated.activeDir
 }
