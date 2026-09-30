@@ -53,12 +53,12 @@
 | --- | --- |
 | `DSH-Desktop-Setup-1.0.17.exe` | Windows x64 安装程序，需以管理员权限运行 |
 
-**安装包校验值**（263,175,956 字节）：
+**安装包校验值**（263,544,302 字节）：
 
 | 算法 | 值 |
 | --- | --- |
-| SHA256 | `9a7a3ed483eaf5ce9acd179e3a7883ccd016e9fe36c4f6c71214eff0201c447d` |
-| SHA512 (base64) | `F5wiWG1kxdiP5SdbIR7V+1CJxLqJuBxNyJo4mjxEiYfAxw2S2j256jfcoDzX80w3WuNfxsC5YMVmpRHKsi7FWw==` |
+| SHA256 | `b426c0083de663b97faf2e2005a5feb78615caf9e319db13ced84d877c7ecab0` |
+| SHA512 (base64) | `BO4hbDVNNuVIM9eS0tN+U3IqpytUFalCk9qvkSFPfeP9yvHNZuZ6Ol+4SkJZYFsUePl+/fyOP5SH9Kx97Lvgng==` |
 
 > 已安装 1.0.16 及更早版本的用户启动后，标题栏余额徽章右侧会亮出天蓝色「更新」按钮，无需手动下载。客户端本身无接口、协议与存储格式变更，配置与数据完全兼容；出厂 DSH 运行包已升级至 0.2.0-rc.2（见上节）。
 
