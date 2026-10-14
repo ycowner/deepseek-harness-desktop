@@ -1,5 +1,8 @@
 appId: com.dsh.desktop
 productName: DSH Desktop
+# 打包后删除 Electron 自带的可选运行时文件（1.0.19 起，当前仅 dxcompiler.dll，-10.0 MB）
+# 清单与删除理由见 scripts/after-pack.js 的注释；升级 Electron 或 DSH 引入 WebGPU 时必须重新验证
+afterPack: scripts/after-pack.js
 # 安装包产物命名（连字符格式，避免上传平台对空格的处理；GitHub Release 页面展示与下载均用此命名）
 artifactName: DSH-Desktop-Setup-${version}.${ext}
 directories:
@@ -20,8 +23,11 @@ win:
     - target: nsis
       arch:
         - x64
-  # 应用以管理员权限运行（解决 DSH 创建符号链接的 EPERM 问题）
-  requestedExecutionLevel: requireAdministrator
+  # 应用以普通用户权限运行。DSH 运行时只创建 junction / 硬链接（普通用户可建），
+  # 运行期写入全在 %LOCALAPPDATA% / userData；装到 Program Files 的提权由 nsis.perMachine
+  # 让安装器单独申请。不要改回 requireAdministrator：每次启动都弹 UAC，且高权限窗口会被
+  # UIPI 拦掉资源管理器的拖放。见 AGENTS.md §12.1 第 2 条。
+  requestedExecutionLevel: asInvoker
   # 只保留这三个 Chromium 语言包（默认 55 个 .pak / 41MB，精简后 3 个 / 1.5MB）。
   # 影响面仅限 Chromium 原生 UI 文案（网页右键菜单、内置错误页等）；DSH Web UI 自身的
   # i18n 由前端包处理，与此无关。en-US 是 Electron 的兜底语言，不可删。
@@ -91,54 +97,27 @@ extraResources:
       - "!**/*.markdown"
       - "!**/docs/**"
       - "!**/man/**"
-  # 预安装的 DSH 包（独立目录，避免 node_modules 被 electron-builder 排除）
-  - from: "resources/dsh-bundled"
-    to: "dsh-bundled"
-    filter:
-      - "**/*"
-      - "!**/dist-types/**"
-      - "!**/*.d.ts"
-      - "!**/*.d.cts"
-      - "!**/*.d.mts"
-      # ---- 安装提速裁剪：只作用于第三方包，上游 DSH 自家包由末尾的正向 pattern 整体豁免 ----
-      # filter 的匹配语义是「按数组顺序、最后一次匹配生效」（app-builder-lib/out/util/filter.js
-      # 的 minimatchAll：已命中时只再用负向 pattern 复测，未命中时只再用正向 pattern 复测），
-      # 因此豁免规则必须放在所有裁剪规则之后。
-      # sourcemap：Node 运行时忽略 //# sourceMappingURL，缺失只影响 DevTools 符号化
-      - "!**/node_modules/**/*.map"
-      # 第三方包内文档（1.0.14 实测 467 个；@deepseek-ai 自家 README 由下方豁免规则保留）
-      - "!**/node_modules/**/*.md"
-      # 依赖包自带的测试目录（1.0.14 实测 1,243 个文件，@deepseek-ai 各包均无此类目录）
-      - "!**/node_modules/**/test/**"
-      - "!**/node_modules/**/tests/**"
-      - "!**/node_modules/**/__tests__/**"
-      - "!**/node_modules/**/.github/**"
-      # lint / 覆盖率配置
-      - "!**/node_modules/**/.eslintrc*"
-      - "!**/node_modules/**/.nycrc*"
-      - "!**/node_modules/**/.editorconfig"
-      # 目标平台仅 Windows x64：node-pty 其他平台的预编译产物无用（约 19MB）。
-      # 必须保留 prebuilds/win32-x64 —— 那是 node-pty 原生绑定的唯一加载来源。
-      - "!**/node-pty/prebuilds/darwin-*/**"
-      - "!**/node-pty/prebuilds/linux-*/**"
-      - "!**/node-pty/prebuilds/win32-arm64/**"
-      # 豁免上游 DSH 自家包：@deepseek-ai/* 每个包都带 README.md / README.zh.md，
-      # 且 1.0.14 产物里有 231 个 README.i18n.yaml，配合 dsh-host-plugin-inventory、
-      # dsh-client-ui-sidebar-documentpreview 等包判断，这些 README 很可能被运行时读取。
-      # 用一条正向 pattern 整体豁免，使裁剪范围与上游 DSH 版本演进解耦：
-      # 将来 @deepseek-ai/* 新增 test/map 也不会被误删。
-      - "**/node_modules/@deepseek-ai/**"
-      # 上一条豁免是「最后一次匹配生效」，会把上面 .d.ts / dist-types 的排除一并覆盖掉
-      # （实测导致 1,340 个 @deepseek-ai 类型声明文件重新进包），所以必须在豁免之后
-      # 再声明一次：DSH 自家包只豁免本次新增的裁剪规则，类型声明照旧排除。
-      - "!**/dist-types/**"
-      - "!**/*.d.ts"
-      - "!**/*.d.cts"
-      - "!**/*.d.mts"
-      # 注意：不要加 !**/doc/** / !**/docs/** / !**/man/** / !**/example(s)/** 这类
-      # 「按目录名裁剪」的规则。实测 yaml 包把运行时代码放在 dist/doc/ 下
-      # （dist/compose/composer.js 里 require('../doc/directives.js')），删掉即 MODULE_NOT_FOUND。
-      # 这类规则总共只省 77 个文件，风险与收益完全不对等。
+  # ---- 出厂 DSH 包（1.0.19 起改为 zstd 单文件，-117.8 MB）----
+  #
+  # 为什么不再直接拷目录：出厂 DSH 有 11,322 个小文件 / 155.3 MB。electron-builder
+  # 的 NSIS 载荷是**逐文件**压缩的，装机要逐个写这 1.1 万个文件；而换 7z/LZMA2
+  # 又会因为 LZMA2 解压慢（实测约 340 秒）而不可接受。实测三选一后选了这个：
+  #
+  #   载荷        压缩后    解压耗时
+  #   逐文件 deflate 50.6 MB      —（当前基线）
+  #   LZMA2 (7z)      更小      约 340 秒，不可接受
+  #   zstd-9 单文件   37.5 MB    9 秒  ← 采用
+  #
+  # 安装时不解压，首次启动由 src/main/dsh-unpack.ts 用 Electron 自带 Node 的
+  # zlib.createZstdDecompress 展开到 %LOCALAPPDATA%/DSH Desktop/dsh-bundled/
+  # （解到用户目录而非 resources/：后者在 Program Files 下，运行时写入会踩
+  # NSIS 升级/卸载与杀软占用两个坑，见 AGENTS.md §12.1 第 50 条）。
+  #
+  # 因此本条**不再需要任何 filter**——原先那 65 行裁剪规则已逐条迁移到
+  # scripts/bundle-dsh-zst.js，在打包 tar 之前生效。迁移后必须做逐文件 diff
+  # 验证解包结果与旧产物完全一致（本次 11,322 = 11,322，内容差异 0）。
+  - from: "resources/dsh-bundled.tar.zst"
+    to: "dsh-bundled.tar.zst"
   # 窗口图标：打包到 resources/icon.ico，供主进程在运行时读取
   - from: "build/icon.ico"
     to: "icon.ico"

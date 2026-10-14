@@ -54,7 +54,7 @@
 | **Loading UX** | Custom `loading.html` (CSS spinner + status text) and `error.html` (error details + Retry / Online Repair buttons). Status updates flow over the IPC `status` channel. |
 | **Security baseline** | Renderer runs with `contextIsolation: true` and `nodeIntegration: false`. A preload script exposes a narrow, audited API surface. |
 | **CSP** | Both loading and error pages declare a `Content-Security-Policy` that blocks foreign-domain scripts and styles. |
-| **Packaging** | `electron-builder` NSIS installer, `perMachine`, with `requestedExecutionLevel: requireAdministrator` to fix EPERM when DSH creates symlinks. |
+| **Packaging** | `electron-builder` NSIS installer, `perMachine` (installs to Program Files; the installer elevates via UAC). The client uses `requestedExecutionLevel: asInvoker` and runs as a standard user. |
 | **Size optimization** | `extraResources` filters exclude `node_modules/**`, `.d.ts`, `docs/`, `.md`, etc. — only `node.exe` is shipped. |
 
 ---
@@ -64,7 +64,7 @@
 | Item | Requirement |
 | --- | --- |
 | OS | Windows 10 / 11 (x64) |
-| Privileges | Administrator (DSH creates symlinks internally and requires `requireAdministrator`) |
+| Privileges | Administrator approval when installing / upgrading (the installer prompts UAC); runs as a standard user |
 | Ports | 3080 by default; auto-increments if taken |
 | Disk | ~200 MB (bundled Node.js + DSH package) |
 | Memory | ≥ 512 MB free |
@@ -76,7 +76,7 @@
 
 ## End-User Installation
 
-Download the NSIS installer → right-click → **Run as administrator** → choose install directory → finish.
+Download the NSIS installer → double-click it (Windows asks for administrator approval) → choose install directory → finish.
 
 On launch, DSH Desktop will automatically:
 
@@ -187,7 +187,7 @@ The pipeline:
 4. `electron-builder`: produce an NSIS installer in `dist-exe/` per `electron-builder.yml`
 5. `scripts/archive-dist-exe.js`: archive the `dist-exe` output
 
-> **Note**: the build needs administrator privileges (`electron-builder` requests UAC to create symlinks). If you cannot elevate, temporarily set `requestedExecutionLevel: asInvoker` in `electron-builder.yml` and accept the runtime EPERM risk.
+> **Note**: the build needs administrator privileges (`electron-builder` creates symlinks when extracting its code-signing toolkit), or Windows Developer Mode. This only affects the build machine, not the client's runtime privileges.
 
 ### Build without packaging
 

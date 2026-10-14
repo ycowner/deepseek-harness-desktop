@@ -34,9 +34,9 @@ import { diag } from './update-diag'
  */
 
 // npm registry 地址
-const NPM_REGISTRY = 'https://registry.npmjs.org'
+export const NPM_REGISTRY = 'https://registry.npmjs.org'
 // 国内镜像（阿里云 npmmirror），优先使用，失败回退到 NPM_REGISTRY
-const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
+export const NPM_REGISTRY_MIRROR = 'https://registry.npmmirror.com'
 const DSH_PACKAGE = '@deepseek-ai/dsh'
 
 /**
@@ -59,11 +59,14 @@ const DOWNLOAD_IDLE_TIMEOUT = 120_000
  *
  * 空闲超时 120 秒：每次收到数据块重置计时；中断/出错时删除部分文件。
  *
+ * 导出供 dsh-components.ts（按需组件安装）复用同一条下载管线，
+ * 两处共用才能让「DSH 修复」与「组件安装」在代理、超时、进度回调上完全一致。
+ *
  * @param url 下载地址
  * @param dest 目标文件路径
  * @param onProgress 进度回调（已下载字节数）
  */
-async function downloadFile(url: string, dest: string, onProgress?: (downloaded: number) => void): Promise<void> {
+export async function downloadFile(url: string, dest: string, onProgress?: (downloaded: number) => void): Promise<void> {
   const controller = new AbortController()
   let timer = setTimeout(() => controller.abort(), DOWNLOAD_IDLE_TIMEOUT)
   const resetTimer = (): void => {
@@ -120,7 +123,7 @@ async function downloadFile(url: string, dest: string, onProgress?: (downloaded:
  * @param filePath 待校验文件路径
  * @param integrity npm packument 的 dist.integrity，形如 "sha512-<base64>"
  */
-async function verifyFileIntegrity(filePath: string, integrity: string): Promise<void> {
+export async function verifyFileIntegrity(filePath: string, integrity: string): Promise<void> {
   const expected = integrity.replace(/^sha512-/, '')
   const actual = await new Promise<string>((resolveHash, rejectHash) => {
     const hash = createHash('sha512')
@@ -159,8 +162,11 @@ const NPM_INSTALL_TIMEOUT = 300_000
  * @param tgzPath DSH 包 tgz 文件路径
  * @param installDir 空的安装目录（npm install 的 cwd，不能是 DSH 包目录本身）
  * @param onProgress 进度回调（文字描述）
+ *
+ * 实现本身与 DSH 无关（就是「在空目录里 npm install 一个 tgz」），导出供
+ * dsh-components.ts 安装单包按需组件时复用，避免再写一套 npm spawn + 镜像回退。
  */
-function installDshFromTarball(tgzPath: string, installDir: string, onProgress?: (msg: string) => void): Promise<void> {
+export function installDshFromTarball(tgzPath: string, installDir: string, onProgress?: (msg: string) => void): Promise<void> {
   return installDshFromTarballWithRegistry(tgzPath, installDir, NPM_REGISTRY_MIRROR, onProgress)
     .catch((mirrorErr) => {
       console.warn(`[DSH Repair] 国内镜像安装失败，回退到 npm registry: ${mirrorErr.message}`)

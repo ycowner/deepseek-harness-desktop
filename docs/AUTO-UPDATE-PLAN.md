@@ -86,9 +86,9 @@ releaseDate: '2026-09-28T08:55:40.141Z'
 
 **结论**：不影响功能，但下载进度条无法显示百分比。处理方式见 §5.3。
 
-### 2.4 应用以管理员权限运行
+### 2.4 应用以普通用户权限运行（1.0.19 起）
 
-`electron-builder.yml:24` `requestedExecutionLevel: requireAdministrator`。`NsisUpdater.doInstall` 对 `isAdminRightsRequired` 为真时走 `elevate.exe` 提权，**与本项目现状一致，无需改动**。
+1.0.19 起 `electron-builder.yml` 的 `requestedExecutionLevel` 改为 `asInvoker`，客户端不再以管理员运行；而 `perMachine` 安装器自身的清单要求管理员。`NsisUpdater.doInstall` 在 `files[].isAdminRightsRequired` 为真时经 `resources/elevate.exe` 拉起安装器，否则先普通 spawn、遇 `EACCES` 再兜底提权。electron-builder 只在生成差分信息时写该字段，本项目关了差分，因此由 `scripts/patch-latest-yml-size.js` 补上 `isAdminRightsRequired: true`，`scripts/verify-release.js` 校验。代价：每次客户端更新会弹一次 UAC（含「下次启动时安装」的退出后静默安装）。
 
 ---
 

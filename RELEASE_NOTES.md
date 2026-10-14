@@ -2,6 +2,52 @@
 
 ---
 
+# Release Notes — DSH Desktop v1.0.19
+
+## ✨ 安装包瘦身：263.5 MB → 208.6 MB（-20.8%）
+
+- **出厂 DSH 改为单个 zstd 包**：原先 11,322 个小文件随安装包逐文件分发，装机要一个个写；现在打包成 `dsh-bundled.tar.zst`（zstd-9，37.5 MB），首次启动时展开到 `%LOCALAPPDATA%\DSH Desktop\dsh-bundled\`（约 9 秒，之后每次启动只是一次目录标记比对，秒过）。
+- **文档预览组件改为按需下载**：`libreoffice-kit` 平台包（181.5 MB，只服务 Word / Excel / PowerPoint 转 PDF）不再随安装包分发。DSH 就绪后后台静默预取；也可从「帮助 → 文档预览组件...」主动安装或重试。**缺件不影响启动，也不影响 PDF / Excel 预览**，只有 Office 转 PDF 会失败，装好即生效、无需重启。
+- 打包时移除 Electron 自带的 `dxcompiler.dll`（约 10 MB，本项目未使用 WebGPU）。
+
+## ⚡ 日常运行不再需要管理员权限
+
+- **此前**：客户端以管理员运行（`requireAdministrator`），每次启动都弹 UAC，且高权限窗口会被 Windows 的 UIPI 拦住资源管理器拖放。
+- **现在**：客户端以普通用户运行（`asInvoker`）。DSH 运行期只创建 junction 与硬链接、写入全在 `%LOCALAPPDATA%`，实测普通用户即可。
+- 安装 / 升级仍需管理员授权——提权由安装器自己申请（`perMachine`），应用内更新经内置 `elevate.exe` 拉起，客户端更新的确认框已提前告知会弹 UAC。
+
+## 🚀 Electron 33 → 44
+
+- Chromium 130（已 EOL）→ 152，回到官方支持窗口内；内置 Node 24.18.1。
+- 官方 breaking changes 逐条核对，本项目零命中（无 `clipboard` 用法；preload 不用 `Buffer` / `setImmediate` / `EventEmitter` 静态辅助；`setWindowOpenHandler` 恒 `deny`）。自定义标题栏（WCO）+ `WebContentsView` 子视图组合行为未变。
+
+## 🔍 改进
+
+- 按需组件的版本约束跟随**本次实际运行的那棵 DSH 树**（用户在线更新过 DSH 时不再是出厂版本），DSH 更新后自动静默对齐版本错位，无需手动重装。
+- 手动检查 DSH 更新时并行查 npmmirror 与 npmjs 取最大版本，并附加查询上游 GitHub Releases：npm 尚未发布新版时会明确告知。
+- 更新确认框不再写死安装包体积（「约 251 MB」），避免换包后误导。
+
+## 📦 安装包
+
+| 文件 | 说明 |
+| --- | --- |
+| `DSH-Desktop-Setup-1.0.19.exe` | Windows x64 安装程序，安装时需管理员授权 |
+
+**安装包校验值**（208,604,425 字节）：
+
+| 算法 | 值 |
+| --- | --- |
+| SHA256 | `9bb5c6a4a52eb913f6988fc5de6abfb50067b27cee30d9859ee19ded01b0741d` |
+| SHA512 (base64) | `H0bZuBtAsMxMJNCTuS3de6WSjvE4ywdaZLHjNIva32ZQ15LuMZ40mA/O5c30Ls/OeowbmBGJheYlGYdNWwhA/g==` |
+
+> 无接口、协议与存储格式变更，配置与数据完全兼容，建议直接覆盖升级。升级后**首次启动**会多约 9 秒的出厂组件解包等待（loading 页有状态提示），属正常现象。
+
+## 🐛 反馈
+
+如在使用中遇到问题，欢迎通过 [Issues](https://github.com/ycowner/deepseek-harness-desktop/issues) 反馈。
+
+---
+
 # Release Notes — DSH Desktop v1.0.18
 
 ## 🐛 修复：更新 DSH 运行包时窗口不再假死

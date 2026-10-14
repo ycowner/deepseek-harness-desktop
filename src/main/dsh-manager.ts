@@ -6,6 +6,8 @@ import { tmpdir, homedir } from 'os'
 import { existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
 import { getNodeBinaryPath, getNodeDir, checkNodeBinary } from './node-binary'
 import { getDshRepairCacheDir, invalidateRepairCacheDir } from './dsh-repair'
+import { getComponentsNodePath } from './dsh-components'
+import { getBundledDshDir, setActiveDshPackageRoot } from './dsh-tree'
 
 /**
  * DSH 包未预装或已损坏的错误标识
@@ -91,6 +93,9 @@ function isPkgDepsComplete(dshDir: string): boolean {
     const entry = resolveDshBin(repairCacheDir)
     if (entry && isPkgDepsComplete(repairCacheDir)) {
       console.log('[DSH] 在在线修复缓存目录中找到 DSH 包')
+      // 记录本次实际启动的树：按需组件的版本约束必须跟这棵树走
+      // （dsh-components 的 getRequiredLibreOfficeKitVersion 依赖它）
+      setActiveDshPackageRoot(repairCacheDir)
       return entry
     }
     if (entry) {
@@ -99,11 +104,12 @@ function isPkgDepsComplete(dshDir: string): boolean {
   }
 
   // 2. 回退到打包预安装目录（dsh-bundled，出厂版本；缓存不存在或无效时使用）
-  const bundledDir = join(getNodeDir(), '..', 'dsh-bundled')
+  const bundledDir = getBundledDshDir()
   if (existsSync(bundledDir)) {
     const entry = resolveDshBin(bundledDir)
     if (entry && isPkgDepsComplete(bundledDir)) {
       console.log('[DSH] 在打包预安装目录 (dsh-bundled) 中找到 DSH 包')
+      setActiveDshPackageRoot(bundledDir)
       return entry
     }
     if (entry) {
@@ -130,6 +136,7 @@ function isPkgDepsComplete(dshDir: string): boolean {
           const found = resolveDshBin(dshPkgPath)
           if (found) {
             console.log(`[DSH] 在 ${npxDir === getBundledNpxCacheDir() ? '打包预安装 npx 缓存' : '用户缓存'} 中找到 DSH 包`)
+            setActiveDshPackageRoot(dshPkgPath)
             return found
           }
         }
@@ -138,6 +145,9 @@ function isPkgDepsComplete(dshDir: string): boolean {
       // 忽略读取错误
     }
   }
+  // 本次查找未命中任何候选：显式清空记录，让 getActiveDshPackageRoot() 落到
+  // 出厂树兜底，而不是留上一轮的陈旧值
+  setActiveDshPackageRoot(null)
   return null
 }
 
@@ -445,7 +455,12 @@ export function startDsh(retryOnAbiMismatch = true): Promise<DshProcess> {
           PATH: `${nodeDir};${process.env.PATH ?? ''}`,
           PORT: String(desiredPort),
           npm_config_cache: npmCacheDir,
-          npm_config_prefix: join(npmCacheDir, 'prefix')
+          npm_config_prefix: join(npmCacheDir, 'prefix'),
+          // 按需组件目录（如 libreoffice-kit 平台包）装在用户可写位置，
+          // 靠 NODE_PATH 进入模块解析链——放在解析链末端，不污染安装目录，
+          // 也避免运行时写 Program Files（见 dsh-components.ts 头注释）。
+          // 追加而非覆盖：保留宿主可能已有的 NODE_PATH。
+          NODE_PATH: [getComponentsNodePath(), process.env.NODE_PATH].filter(Boolean).join(';')
         },
         cwd: nodeDir,
         windowsHide: true

@@ -54,7 +54,7 @@
 | **加载体验** | 自定义 `loading.html`（旋转动画 + 状态文字）+ `error.html`（错误详情 + 重试/在线修复按钮），通过 IPC `status` 通道实时刷新状态 |
 | **安全基线** | 渲染进程 `contextIsolation: true` + `nodeIntegration: false`，preload 注入受限 API |
 | **CSP** | 加载/错误页都声明 `Content-Security-Policy`，禁外域脚本/样式 |
-| **打包** | `electron-builder` NSIS 安装包（`perMachine`、`requestedExecutionLevel: requireAdministrator`，解决 DSH 创建符号链接的 EPERM 问题） |
+| **打包** | `electron-builder` NSIS 安装包（`perMachine` 装到 Program Files，安装器自带 UAC 提权；客户端 `requestedExecutionLevel: asInvoker`，以普通用户运行） |
 | **体积优化** | 通过 `extraResources` filter 排除 `node_modules/**`、`.d.ts`、`docs/`、`.md` 等无关文件，**只打包 `node.exe`** |
 
 ---
@@ -64,7 +64,7 @@
 | 项 | 要求 |
 | --- | --- |
 | 操作系统 | Windows 10 / 11（x64） |
-| 权限 | 管理员（DSH 内部会创建符号链接，需 `requireAdministrator`） |
+| 权限 | 安装 / 升级时需管理员授权（安装器自动弹 UAC）；日常运行为普通用户权限 |
 | 端口 | 3080（默认）；被占用时自动顺延 |
 | 磁盘 | 约 200 MB（含内置 Node.js + DSH 包） |
 | 内存 | ≥ 512 MB 可用 |
@@ -76,7 +76,7 @@
 
 ## 用户使用（安装包用户）
 
-下载 NSIS 安装包 → 右键 → **以管理员身份运行** → 选择安装目录 → 完成。
+下载 NSIS 安装包 → 双击运行（Windows 会弹出管理员授权确认）→ 选择安装目录 → 完成。
 
 启动 DSH Desktop 后会自动：
 
@@ -187,7 +187,7 @@ npm run package
 4. `electron-builder`：按 `electron-builder.yml` 打 NSIS 安装包到 `dist-exe/`
 5. `scripts/archive-dist-exe.js`：把 `dist-exe` 内容压缩归档
 
-> **注意**：构建需要管理员权限（`electron-builder` 会请求 UAC 以创建符号链接）。若不想提权，可临时把 `electron-builder.yml` 中的 `requestedExecutionLevel` 改为 `asInvoker` 并自行承担运行期 EPERM 风险。
+> **注意**：构建需要管理员权限（`electron-builder` 解压签名工具包时会创建符号链接），或开启 Windows 开发者模式。这只影响构建机，与客户端运行权限无关。
 
 ### 仅构建不打包
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-desktop",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "DeepSeek Harness Web 桌面客户端",
   "main": "dist/main/index.js",
   "scripts": {
@@ -9,13 +9,14 @@
     "start": "electron-vite preview",
     "package": "electron-vite build && electron-builder && node scripts/archive-dist-exe.js",
     "postinstall": "node scripts/download-node.js",
-    "prepackage": "node scripts/download-node.js && node scripts/preinstall-dsh.js",
+    "prepackage": "node scripts/download-node.js && node scripts/preinstall-dsh.js && node scripts/bundle-dsh-zst.js",
     "download-node": "node scripts/download-node.js",
-    "preinstall-dsh": "node scripts/preinstall-dsh.js"
+    "preinstall-dsh": "node scripts/preinstall-dsh.js",
+    "bundle-dsh-zst": "node scripts/bundle-dsh-zst.js"
   },
   "devDependencies": {
     "@types/node": "^24.13.4",
-    "electron": "^33.0.0",
+    "electron": "^44.5.1",
     "electron-builder": "^25.0.0",
     "electron-vite": "^2.3.0",
     "typescript": "^5.5.0",

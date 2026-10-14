@@ -9,11 +9,12 @@
  * 代价极高且现场很难排查。而 sha512 写错恰恰是手改 yml、重新打包后忘记同步
  * 等场景下最容易发生的错误。
  *
- * 本脚本做四件事，任何一项不通过即 exit 1：
- *   1. 调用 patch-latest-yml-size.js 补齐 size 字段；
+ * 本脚本做五件事，任何一项不通过即 exit 1：
+ *   1. 调用 patch-latest-yml-size.js 补齐 size / isAdminRightsRequired 字段；
  *   2. 校验 latest.yml 里的 version 与 package.json 的 version 一致；
  *   3. 逐字节重新计算安装包的 sha512，与 latest.yml 比对；
- *   4. 校验 size 与文件实际字节数一致。
+ *   4. 校验 size 与文件实际字节数一致；
+ *   5. 校验 files 段含 isAdminRightsRequired: true。
  * 全部通过后打印**严格有序**的上传步骤。
  *
  * 用法
@@ -110,6 +111,13 @@ if (Number(sizeMatch[1]) !== actualSize) {
   fail(`size 不匹配: latest.yml 写 ${sizeMatch[1]}，实际 ${actualSize}`);
 }
 console.log(`[verify-release] size 校验通过 (${actualSize})`);
+
+// ---- 5. isAdminRightsRequired ----
+if (!/^\s*isAdminRightsRequired:\s*true\s*$/m.test(raw)) {
+  fail('latest.yml 的 files 段缺少 isAdminRightsRequired: true\n' +
+    '提示：客户端以 asInvoker 运行，缺此字段时应用内更新只能靠 EACCES 兜底提权（patch-latest-yml-size.js 未生效）');
+}
+console.log('[verify-release] isAdminRightsRequired 校验通过');
 
 // ---- 全部通过：给出上传步骤 ----
 const mb = (actualSize / 1024 / 1024).toFixed(1);

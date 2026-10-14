@@ -16,7 +16,7 @@
 | 版本    | `1.0.0`                                                          |
 | 协议    | MIT                                                              |
 | 目标平台  | **仅 Windows x64**（`win: { target: nsis, arch: x64 }`）            |
-| 权限模型  | 安装包以**管理员权限**运行（`requestedExecutionLevel: requireAdministrator`） |
+| 权限模型  | **安装器**以管理员运行（`perMachine` 装到 Program Files）；**客户端**以普通用户运行（`requestedExecutionLevel: asInvoker`，1.0.19 起） |
 
 **项目定位**：把 `npx @deepseek-ai/dsh web` 这个 CLI 命令封装成一个 Windows 桌面应用。终端用户双击图标即可启动 DSH Web 服务并加载其界面，无需接触终端或浏览器。
 
@@ -28,7 +28,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 | 层     | 选型                                                             |
 | ----- | -------------------------------------------------------------- |
-| 运行时   | Electron `^33.0.0`                                             |
+| 运行时   | Electron `^44.5.1`（Node 24.18.1 / Chromium 152 / EOL 2027-03-02）            |
 | 构建    | electron-vite `^2.3.0` + Vite `^5.4.0`                         |
 | 语言    | TypeScript `^5.5.0`（`strict: true`，`target: ES2022`）           |
 | 打包    | electron-builder `^25.0.0`（NSIS 安装包）                           |
@@ -65,8 +65,11 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 ├── src/
 │   ├── main/                    ← 主进程
 │   │   ├── index.ts             ← 应用入口、窗口（WCO 标题栏 + 内容子视图）、IPC 路由、帮助菜单、模态框注入
-│   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）
+│   │   ├── dsh-manager.ts       ← DSH 进程生命周期（启动/停止/健康检查/端口/依赖完整性）；在 `findCachedDshEntry()` 命中那一刻把实际运行的 DSH 根目录记进 `dsh-tree`
+│   │   ├── dsh-tree.ts          ← DSH 包树位置共享点（1.0.19：出厂 `dsh-bundled` 路径的唯一权威 + 「本次实际启动的树」记录 + zstd 解包路径）
+│   │   ├── dsh-unpack.ts        ← 出厂 DSH 的 zstd 运行时解包（1.0.19：11,322 个小文件 → 单个 `dsh-bundled.tar.zst`，首次启动展开到 %LOCALAPPDATA%，见 §6.10）
 │   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare 装进 dsh.new.<ts>/ / activate 两次 rename + 就绪后异步回收）
+│   │   ├── dsh-components.ts    ← 按需组件安装（1.0.19：libreoffice-kit 平台包 181.5 MB 改为运行时下载，见 §6.9）
 │   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询、npm 双源并行取最大、GitHub 上游版本信息查询（仅手动检查告知）
 │   │   ├── app-update.ts        ← 客户端更新元数据检查（拉 {publish.url}/latest.yml、版本比较、清单文件名净化）+ 遗留安装包清理
 │   │   ├── auto-updater.ts      ← 客户端自动下载/安装（electron-updater 单例封装、状态机、进度节流、提示后安装决策）
@@ -112,6 +115,8 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 - 日常开发：`npm install`（自动下载 Node）→ `npm run dev`
 - 改完代码验证：`npm run build`（不打包，纯编译检查）
 - 发版：`npm run package`（产物在 `dist-exe/<版本号>/`，归档在 `dist-exe-archives/<时间戳>/`）
+
+> **Electron ≥ 42 的额外一步**：`npm install` **不再**自动下载 Electron 二进制（懒下载，见 §12.1 第 51 条）。装完先确认 `node_modules/electron/dist/version` 存在；不存在就补跑 `node node_modules/electron/install.js`（国内加 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`），否则 `dev` / `package` 都会失败。
 
 ---
 
@@ -333,7 +338,11 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 - **停滞看门狗只提示、不自动重试**：`startDownloadStallWatchdog()` 每 2 秒比对 `Date.now() - progressAt`，超过 `DOWNLOAD_STALL_THRESHOLD_MS = 8000` 就置 `stalled`，横幅与按钮改显「速度为 0，已等待 N 秒」。8 秒的依据是上游 1 秒一次 + 我方 2 秒节流，连续 4 次缺失才算真卡住。**不要加自动重试**——会引入并发下载与半截文件风险。定时器都调了 `unref()`，退出路径（`quitAndInstallAppUpdate` / `window-all-closed`）必须 `stopDownloadStallWatchdog()` + `stopDownloadPeriodicReprojection()`。
 - **`dshView` 必须监听渲染进程健康**：`createWindow()` 里 `unresponsive` / `responsive` / `render-process-gone` / `did-fail-load` / `did-navigate-in-page` 五个都要挂。`dshView` 崩了或卡住时横幅会静默停在旧值，而这些事件是唯一能拿到原因的入口；`did-navigate-in-page` 还要顺带触发一次重投影（页面换路由后 DOM 里没有横幅节点了）。
 
-发布流程配套要求：安装包与 `latest.yml` 传到 R2 桶 `dsh-desktop`，**先传 exe、最后传 latest.yml**（反序会出现客户端拉到新元数据却下不到包的窗口期）。上传前跑 `node scripts/verify-release.js` 核对 sha512/size。GitHub Release 仍需保留（更新日志入口 + 人工兜底下载），每个 release 的 **tag 必须以 `v` 开头**。`notifications.json` 与 `latest.yml` 同源，**但没有版本号语义**，可随时覆盖上传（注意 CDN 缓存，必要时加时间戳）。
+发布流程配套要求：安装包与 `latest.yml` 传到 R2 桶 `dsh-desktop`，**先传 exe、最后传 latest.yml**（反序会出现客户端拉到新元数据却下不到包的窗口期）。上传前跑 `node scripts/verify-release.js` 核对 sha512/size/isAdminRightsRequired。
+
+**`latest.yml` 必须带 `files[].isAdminRightsRequired: true`**（1.0.19 起）：客户端以 `asInvoker` 运行，`perMachine` 安装器要管理员。`NsisUpdater.doInstall` 见到该字段会直接经 `resources/elevate.exe` 拉起安装器，缺失时只能靠 spawn 报 `EACCES` 后兜底提权。electron-builder 只在生成差分信息时写它，本项目关了差分（§8.2.1），所以由 `patch-latest-yml-size.js` 补、`verify-release.js` 校验。用户侧表现：每次客户端更新弹一次 UAC，「下次启动时安装」的 UAC 会在窗口关闭后才出现（安装时机对话框已提示）；用户拒绝 UAC 不丢下载，下次检测到更新时 `validateDownloadedPath` 命中缓存直接进 downloaded 态。
+
+GitHub Release 仍需保留（更新日志入口 + 人工兜底下载），每个 release 的 **tag 必须以 `v` 开头**。`notifications.json` 与 `latest.yml` 同源，**但没有版本号语义**，可随时覆盖上传（注意 CDN 缓存，必要时加时间戳）。
 
 > **同版本号重推收不到**：`app-update.ts` 的判定是 `compareVersions(current, latest) >= 0 → up-to-date`。已装 X 的用户拉不到同为 X 的新包。1.0.17 因 R2 上已有同名包被判定作废重来（用户确认无人下载）。若将来要作废某一版，必须先确认 R2 控制台无该版下载记录。
 
@@ -426,6 +435,46 @@ Shadow DOM 迁移的代价：**外部选择器全部失效**，唯一入口是 `
 - `assertValidation()`：12 类非法输入必须被拒（`javascript:`/`data:`/`http:` 链接、非法 id、id 超长、坏 type/level、坏时间窗、id 重复、条数超限、标题/正文超长、缺字段、非法 JSON、坏根节点），1 类合法输入必须通过
 - `assertPlan()`：严重度排序 / 3 条截断 / 已读过滤 / 生效窗口
 - `assertBannerSafety()`：正文必须 `textContent` 赋值、`innerHTML` 只出现 1 次（图标）、外链走 `openExternal`、关闭回传 `noticeRead`
+
+### 6.9 按需组件（`src/main/dsh-components.ts`，1.0.19 起）
+
+把 DSH 依赖树里体积大、但用得少的包从安装包移到运行时下载。当前只有一个组件：`@deepseek-ai/libreoffice-kit-win32-x64`。
+
+| 项 | 说明 |
+| --- | --- |
+| 为什么是它 | 181.5 MB（`bin/libreoffice-kit.exe` 单文件 170.3 MB），压缩后约占安装包 **27%**，但只服务 `.docx/.xlsx/.pptx → PDF`。PDF/Excel 预览走同包的 `lib/client.pdf.js` / `client.excel.js`，与它无关 |
+| 落点 | `%LOCALAPPDATA%/DSH Desktop/components/node_modules/`。**不装在 `resources/` 下**——那是 Program Files，运行时写入会踩 NSIS 升级/卸载与杀软占用两个坑（§12.1 第 50 条） |
+| 怎么让 DSH 看见 | 主进程 spawn DSH 时注入 `NODE_PATH=<components>/node_modules`（`dsh-manager.ts`）。Node 的解析顺序是「逐级向上找 `node_modules/`，都找不到才查 `NODE_PATH`」，所以它落在解析链**末端**，不污染安装目录 |
+| 版本来源 | **入口包 `@deepseek-ai/libreoffice-kit` 的 `optionalDependencies`**，不写死。读**本次实际运行的那棵 DSH 树**（`getActiveDshPackageRoot()`，由 `findCachedDshEntry()` 命中那一刻记录），出厂 `dsh-bundled` 仅兜底。见 §12.1 第 53、56 条 |
+| 版本错位自愈 | `isLibreOfficeKitReady()` 比对「已装版本 vs 当前 DSH 要求的版本」，不一致即判未就绪 → 重装到正确版本。DSH 更新后由 `reconcileComponentsAfterDshUpdate()` 清掉「本次进程只试一次」闸门并重判，**自动静默对齐，不加「强制重装」入口**。要求版本读不到（null）时不比较版本，否则每次启动都会白下 68 MB |
+| 安装流程 | 读版本 → 查 packument 拿 integrity → 下载 tgz（npmmirror 优先，回退 npmjs）→ sha512 校验 → staging 目录 `npm install <tgz>` → 两次同卷 rename 换位 → 异步回收旧目录。下载 tgz 的临时目录（`tmpdir()/dsh-component-<ts>/`，68 MB）清理放在 **`finally`**，两条路径都覆盖，见 §12.1 第 55 条。全程复用 `dsh-repair.ts` 导出的 `downloadFile` / `verifyFileIntegrity` / `installDshFromTarball` |
+| 触发时机 | ① DSH 就绪后 `prefetchComponentsInBackground()` **静默**预取（失败不弹窗，同 §12.1 第 48 条公告的失败语义）；② 帮助菜单「文档预览组件...」手动装/重试；③ `performUpdate()` 完成 DSH 更新后 `reconcileComponentsAfterDshUpdate()` 触发一次版本对齐（位置在 `discardRetiredDshDir` 之后、`checkDshUpdateAndPrompt()` 之前，与首启预取同理不跟首屏渲染抢磁盘 IO）。三条路径共用 `isInstalling` 互斥锁与「本次进程只试一次」闸门 |
+| 缺件表现 | **不崩，也不影响启动**。上游 `libreoffice-kit/lib/index.js` 的 `resolveEngine()` 在 win32 分支抛 `Required LibreOfficeKit native package is missing: <name>`；该错误被 `dsh-office-to-pdf` 的 `createConverter().catch()` 接住，再包成 `OfficeToPdfError` 作为一次普通工具调用失败返回 |
+| 装好即生效 | 同一处 `delete slot.converter` 会在引擎失败时让 converter 缓存失效，**下一次调用自动重新初始化，无需重启 DSH** |
+| 磁盘占用 | 组件装好后约 **182 MB**（`%LOCALAPPDATA%/DSH Desktop/components`）。**注意 `npm-cache` 会随安装次数累积**：`npm install <本地 tgz>` 会把 tgz 复制一份进 `_cacache`（每次 68 MB），反复安装/排障可累积到 GB 级。清理用内置 npm 而非手删目录：<br>`resources/node/node.exe resources/node/node_modules/npm/bin/npm-cli.js cache clean --force --cache="%LOCALAPPDATA%/DSH Desktop/npm-cache"`。<br>删缓存不影响功能（只是下次装组件要重新下载），但 `_logs` 建议留着，那是组件安装失败的取证依据 |
+
+---
+
+### 6.10 出厂 DSH 的 zstd 运行时解包（`src/main/dsh-unpack.ts`，1.0.19 起）
+
+出厂 DSH 有 **11,322 个文件 / 155.3 MB**。原先以目录形式随安装包分发，本版改为单个 `resources/dsh-bundled.tar.zst`，首次启动时展开到 `%LOCALAPPDATA%`。
+
+| 项 | 说明 |
+| --- | --- |
+| 为什么这么做 | NSIS 载荷是**逐文件**压缩的，装机要逐个写这 1.1 万个小文件；而换 7z/LZMA2 又因 LZMA2 解压慢而不可用（见下表） |
+| 体积对比 | 逐文件 deflate **50.6 MB** → zstd-9 单文件 **37.5 MB** |
+| 解压耗时 | zstd-9 解 11,322 个文件 **9 秒**（tar.exe 实测，含落盘）；LZMA2 同一棵树约 **340 秒** |
+| 为什么不用 7z 装时解 | electron-builder 25 在 `NsisTarget.js:75` 把载荷格式**硬编码**为 zip/7z 二选一，且 NSIS 的 Nsis7z 插件**不支持 zstd 压缩方法**。只有运行时解包这条路 |
+| 解包目标 | `%LOCALAPPDATA%/DSH Desktop/dsh-bundled/`。**不放 `resources/`**（Program Files 下运行时写入会踩 NSIS 升级/卸载与杀软占用两个坑，即 §12.1 第 50 条，与 libreoffice-kit 当初移出 resources 同理） |
+| 幂等机制 | 目标目录内写 `.dsh-bundled-manifest.json`，记录 zst 的 `size` + `mtimeMs`。启动时比对一致即跳过（一次 `statSync`）。应用升级带来新 zst → 两者变化 → 自动重解 |
+| 原子性 | 解到 `dsh-bundled.new.<ts>/` → 旧目录 rename 成 `.old.<ts>` → 新目录 rename 上位。同卷 rename 毫秒级，失败时把旧目录换回原位。与 `dsh-repair` 的 activate 同构 |
+| 残留清理 | `sweepStaleDirs()` **排在「标记命中即 return」之前**（每次启动都跑），异步删除 `.new.*`/`.old.*`。删除必须带 `maxRetries: 5, retryDelay: 200` 且失败记日志，见 §12.1 第 59 条 |
+| 调用点 | `index.ts` 的 `startDshAndLoad()`，在 `startDsh()` **之前**。只在应用启动路径做——出厂 zst 仅随应用升级变化，DSH 在线更新不影响它 |
+| 解包失败 | 不直接判死。`startDsh()` 仍会尝试复用在跑的 DSH 或 npx 缓存，全落空才落到 `DSH_PACKAGE_MISSING` 的在线修复流程 |
+| 路径解析 | `getBundledDshDir()`（`dsh-tree.ts`）是**双态**的：已解包 → `%LOCALAPPDATA%` 目录；否则 → `resources/dsh-bundled/`（开发模式）。打包后未解包时后者不存在，`findCachedDshEntry()` 自然跳过 |
+| 裁剪规则 | 原 `electron-builder.yml` 那 65 行 `extraResources.filter` 已**逐条迁移**到 `scripts/bundle-dsh-zst.js`（在打 tar 之前生效）。迁移后必须做逐文件 diff，见 §12.1 第 57 条 |
+
+**开发模式**：`npm run dev` 下 `resources/dsh-bundled/` 目录仍在（`preinstall-dsh.js` 正常产出），`ensureBundledDshExtracted()` 检测到无 `.tar.zst` 即直接返回，行为不变。
 
 ---
 
@@ -634,8 +683,11 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 1. **不要把 DSH 包放到 `resources/node/node_modules/` 下**。
    - electron-builder 的 `extraResources` filter 用 `!**/node_modules/**` 排除，运行时会找不到。
    - 必须放 `resources/dsh-bundled/`（独立目录）。
-2. **不要去掉 `requestedExecutionLevel: requireAdministrator`**。
-   - DSH 内部需要创建符号链接，没有管理员权限会触发 EPERM。
+2. **不要把 `requestedExecutionLevel` 改回 `requireAdministrator`**（1.0.19 起为 `asInvoker`）。
+   - 当初提权的理由是「DSH 创建符号链接会 EPERM」。实测核对出厂 DSH 树：运行时只建 **junction**（`libreoffice-kit` 的 `symlink(..., 'junction')`）与**硬链接**（附件、会话持久化、原生模块加载器），二者普通用户都能建；内置 npm 11 在 Windows 用 cmd-shim + junction。运行期写入全在 `%LOCALAPPDATA%` / `userData`，`resources/` 只读。
+   - 提权的代价：每次启动弹 UAC；高权限窗口会被 UIPI 拦掉资源管理器拖放；DSH 执行的所有工具都带管理员权限。
+   - 装到 Program Files 的提权由 `nsis.perMachine` 让安装器自己申请（`RequestExecutionLevel admin`），与 exe 清单无关；安装完成后拉起应用走 `StdUtils.ExecShellAsUser`，本来就是降权拉起。应用内更新的提权见 §6.5（`isAdminRightsRequired`）。
+   - 新增运行时代码若要建真正的 file/dir 符号链接（非 junction），必须自己处理 EPERM（提示用户开启 Windows 开发者模式），不要回退成整个应用提权。
 3. **不要修改 `DSH_PACKAGE_MISSING_ERROR_NAME` 字符串常量**。
    - 错误页 JS 用 `errorText.indexOf('[CODE:DSH_PACKAGE_MISSING]')` 判断是否显示"在线修复"按钮，改了字符串会断裂。
 4. **不要在 `window-all-closed` 路径里只调 `child.kill()`**。
@@ -781,6 +833,55 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
     - **不要用 `existsSync` 当唯一门禁**：它只是快判。让位旧目录之后必须**复查目标是否真的消失**，不满足就用 `fsp.rm` 异步兜底删除再 rename——否则目标残留会让后续 rename 报同一个 EPERM，而两种成因在错误码上完全无法区分。
     - **不要把 `child.on('exit')` 改成等 `close`** 来"确保 npm 彻底结束"：npm 会 spawn 继承 stdio 的孙进程（如 node-gyp），`close` 可能迟迟不触发，改了会让「npm 已成功但 Promise 挂到 300s 超时 → 误报安装超时」，比原问题更糟。等一等交给重试即可。
     - 这类失败不会在控制台留下痕迹（打包版无控制台），**必须接入 `update-diag`**：`dsh-prep` / `dsh-rename` / `dsh-act` 三个标签会落盘到 `%APPDATA%\<userData>\logs\update-diag.log`（开发模式 userData 是 `dsh-web-desktop`，打包版是 `DSH Desktop`）。没有它就只能靠猜。
+51. **不要以为 `npm install` 装完 Electron 就有二进制**。Electron 42 起，`electron` npm 包**取消了 postinstall 下载二进制**，改为首次运行时懒下载（`ELECTRON_SKIP_BINARY_DOWNLOAD` 同时失效，改用 `ELECTRON_INSTALL_PLATFORM` / `ELECTRON_INSTALL_ARCH`）。
+    - 症状：`npm install` 5 秒就 "added N packages" 退出，`node_modules/electron/dist/` **整个目录不存在**（连 `version` 文件都没有），随后 `npm run dev` / `npm run package` 报找不到 electron 可执行文件。
+    - 处理：显式跑一次 `node node_modules/electron/install.js`。国内网络加 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`（否则默认走 GitHub releases）。本仓库根 `postinstall`（`download-node.js`）**不受影响**，所以别把"postinstall 没生效"和这条混为一谈——根脚本照常跑，只有 electron 包自己变了。
+    - 排查顺序：先 `Test-Path node_modules/electron/dist/version`，再怀疑网络/镜像。
+52. **升级 Electron 大版本前，先单独量一次 `electron.exe` 的体积**。Electron 每跨一个大版本，`electron.exe` 都会显著变大（Chromium 130 → 152 实测 **180.3 MB → 234.3 MB，+54 MB**），这不是回归而是常态。ANGLE 静态链接省下的 `libGLESv2.dll` + `libEGL.dll`（约 8.5 MB）**远不足以抵消 exe 的增长**。
+    - 结论先行：Electron 升级是**安全债**（Chromium 130 已 EOL）而非体积优化手段。想减体积要另找门路（裁剪 DSH 依赖树），不要把两者混为一笔账。
+    - 迁移前必查官方 `docs/breaking-changes.md` 对应区间，并对本项目代码逐条 grep 命中。本项目 33 → 44 全部命中数为零（三处关键确认：`src/` 无任何 `clipboard` 用法；`src/preload/index.ts` 不用 `Buffer` / `setImmediate` / `require('events'|'timers'|'url')` / `EventEmitter` 静态辅助；`setWindowOpenHandler` 恒返回 `action: 'deny'`，从不放行子窗口）。
+    - `WebContentsView` + `titleBarStyle: 'hidden'` + `titleBarOverlay` 这套组合在 44 上未变，但 WCO 的 `env(titlebar-area-*)` **仍然只在主 webContents 生效**，§12.2 第 21 条的约束不受影响。
+53. **不要把按需组件的版本号写死在 `dsh-components.ts` 里**。平台包版本必须从**入口包 `@deepseek-ai/libreoffice-kit` 的 `optionalDependencies`** 读（`getRequiredLibreOfficeKitVersion()`）。
+    - 上游把 `libreoffice-kit` 与 `libreoffice-kit-win32-x64` 一起发版，两者的版本号在 `lib/index.js` 的 `ENGINE_VERSIONS` 里被强绑定：`readEngine()` 会校验 `pkg.version !== ENGINE_VERSIONS[target]` 并抛 "incompatible or incomplete manifest"。写死的版本在上游发新版后会**静默失效**——下载能成功、安装能成功，唯独每次转换都失败，且错误信息指向 manifest 不兼容而不是版本写错，极难排查。
+    - 同理，`isLibreOfficeKitReady()` 必须校验 `prebuilds.json` 声明的 `engine.executable` **真实存在**。只校验两个 json 文件的话，缺 exe 时上游报的错是 "is not a file" 而不是「组件未安装」，会把排查方向带偏。
+    - **更关键的是必须校验「已装版本 == 当前 DSH 要求的版本」**。只校验文件存在与否，系统就没有自愈能力：DSH 更新后要求的新版本与已装版本不同时，`isLibreOfficeKitReady()` 照样返回 true，菜单谎报「已安装」，没有任何机会重装。版本不符时返回 false，配合 `reconcileComponentsAfterDshUpdate()` 重置闸门即可自动纠正。
+    - 反向约束：**`required` 为 null（读不到要求版本）时不要比较版本**。否则 DSH 树异常时每次启动都判定未就绪，反复重下 68 MB。
+    - 相关：`dsh-repair.ts` 的 `downloadFile` / `verifyFileIntegrity` / `installDshFromTarball` / 两个 registry 常量已导出给本模块复用，**不要在 `dsh-components.ts` 里另写一套下载管线**——两处的代理、超时、镜像回退、进度回调必须完全一致。
+54. **不要把 `dsh-bundled` 当成 `node/` 的子目录拼路径**。两者是 `resources/` 下的**兄弟目录**。
+    - 正确写法：`getBundledDshDir()`，即 `join(getNodeDir(), '..', 'dsh-bundled')`，定义在 `src/main/dsh-tree.ts`。**任何解析预装 DSH 树的路径都必须复用这一个函数，不要各自拼。**
+    - 实测（本机 2026-10-05，1.0.19-rc 前的实机验证）：`getRequiredLibreOfficeKitVersion()` 曾误写成 `join(dirname(getNodeBinaryPath()), 'dsh-bundled', ...)`，而 `dirname(getNodeBinaryPath())` 就是 `<resources>/node` 本身，于是解析到不存在的 `<resources>/node/dsh-bundled/...`。**打包模式与开发模式都复现**（`resources/` 下只有 `dsh-bundled/` 与 `node/` 两个平级目录）。
+    - 症状极具欺骗性：函数 `catch` 后返回 `null`，`installLibreOfficeKit()` 抛「无法从 DSH 运行时读取 libreoffice-kit 的版本约束，请重装 DSH 运行包」，而后台预取**按设计静默**（§12.1 第 48 条），只 `console.warn` 到一个**打包版根本不存在的控制台**。结果就是按需安装**从未成功过**，而应用启动、DSH 就绪、余额、更新日志一切正常，单测与分步端到端脚本（手工构造正确路径）全都测不出来。
+    - 教训：这类"从兄弟/父目录解析资源"的路径**必须用真实打包布局验证**，不能只测函数内部的各个环节。验证手段：先 `Get-ChildItem resources -Directory` 确认真实层级，再用同一表达式拼出路径 `Test-Path`。另见第 50 条末尾——**静默失败路径必须落盘日志**，否则只能靠实机跑出来。
+55. **不要只在 `catch` 里清理下载缓存目录**。成功路径漏清会长期泄漏磁盘。
+    - `installLibreOfficeKit()` 的下载 tgz 落在 `tmpdir()/dsh-component-<ts>/`（本例 **68.1 MB**）。原实现只在 `catch` 分支 `fsp.rm(tempDir)`，成功分支只回收了 `stagingDir` 与 `retiredDir`，于是**每次成功安装都在 `%TEMP%` 留下一个 68 MB 目录**，反复安装线性累积。
+    - 正确做法：把清理放进 `finally`。`fsp.rm` 是异步的 `void ... .catch()`，放 `finally` 不会阻塞主线程返回（对照第 49/50 条：主线程同步 fs 超过约 5 秒会被 Windows 判「未响应」）。
+    - 同类排查口径：**凡是 `tmpdir()` 下按时间戳建的临时目录，都要确认成功路径也删**。验证方法很便宜——跑一次安装，然后 `Get-ChildItem $env:TEMP -Filter "<前缀>-*"` 看有没有留下带时间戳的目录。
+    - `installDshFromTarball` 内部会设 `npm_config_cache` 到 `%LOCALAPPDATA%/DSH Desktop/npm-cache`。**别漏掉**：本机（及不少开发机）默认 npm cache 目录 `D:\Develop\nodejs\node_cache` 不可写，不覆盖会直接 `EPERM: mkdtemp` 失败。
+56. **不要在 `dsh-components.ts` 里直接 import `dsh-manager.ts`；也不要固定从出厂 `dsh-bundled` 读版本约束**。
+    - 共享的东西一律走 `src/main/dsh-tree.ts`（叶子模块，只依赖 `node-binary`）：`getBundledDshDir()` 给出厂路径，`setActiveDshPackageRoot()` / `getActiveDshPackageRoot()` 传「本次实际启动的树」。
+    - 原因一（环）：`dsh-manager.ts` 已经 import `dsh-components`（取 `getComponentsNodePath`），反向 import 会形成循环依赖。
+    - 原因二（分叉，本条要记的核心）：**DSH 有两棵树会分叉**——`findCachedDshEntry()` 第 1 优先级是 `%LOCALAPPDATA%/DSH Desktop/dsh-cache/dsh`（用户更新后的版本，实际运行的那棵），第 2 优先级才是出厂 `dsh-bundled`。用户更新过 DSH 之后两者版本不同，`optionalDependencies` 也就不同。固定读出厂树会让**运行中的 DSH 拿到另一棵树要求的版本**，`readEngine()` 的 `pkg.version !== ENGINE_VERSIONS[target]` 强校验必然抛 "incompatible or incomplete manifest"——下载安装全都成功，唯独每次转换都失败。
+    - 实测（本机 2026-10-05）：`dsh-cache/dsh` 是 0.2.1-alpha.1 / 入口包 0.1.5（要求 win32-x64 **0.1.5**），出厂 `dsh-bundled` 是 0.2.0-rc.2 / 入口包 0.1.3（要求 **0.1.3**），而已装组件是 0.1.3——运行中的 DSH 拿到的正是「别的那棵树」的版本。
+    - **记录点只能在 `findCachedDshEntry()` 命中那一刻**：不要从 bin 入口路径反推根目录，各版本 `bin` 字段的路径深度不同，反推不可靠。该函数有 4 个返回点，**每个都要 `setActiveDshPackageRoot()`**（含未命中时传 `null` 清空，否则会留上一轮的陈旧值）。
+    - `getActiveDshPackageRoot()` 记录值失效（用户手工删了目录）时返回 null 而**不重解析**，调用方据此回退出厂树。DSH 更新场景无需重解析：`performUpdate()` 会在同一主进程内重新 `startDsh()` → `findCachedDshEntry()`，记录值天然刷新。所以 `reconcileComponentsAfterDshUpdate()` 的调用点**必须晚于 `startDsh()`**。
+    - 已知既有技术债（本次未引入、未修复）：`src/main` 的依赖图**本来就成环**——`dsh-version → dsh-manager → dsh-components → dsh-version`，另有 `dsh-repair` 也参与。目前无实际故障（环上各模块的顶层代码都不互相调用导出，且 `dsh-tree` 在任何使用方之前就已完全初始化），但新增依赖时要意识到它已经存在，别把排查时间浪费在「是不是我引入的」上。
+57. **不要把「小文件数量多」当成安装慢的唯一原因去改 NSIS 模板**。先测清楚 TEMP 往返到底占多少。
+    - electron-builder 的 7z 分支（`extractAppPackage.nsh:92-108`）是「解到 `%TEMP%/7z-out` → `CopyFiles` 到 `$INSTDIR`」两趟搬运，1.0.14 实测全新安装 360 秒，因此本项目改用 `useZip: true`（一次 `nsisunz::Unzip` 直达目标）。
+    - **但实测搬运根本不是瓶颈**（本机 2026-10-05，robocopy 计时并校验实际产出文件数）：`dsh-bundled` 的第二趟 `CopyFiles` 11,322 文件 / 155.3 MB 只要 **14.1 秒**，回收 TEMP 2.8 秒，合计约 **17 秒**。而 7z 路径是 360 秒——**约 340 秒是 LZMA2 自身的解压速度**。所以「改模板让 7z 直解到 `$INSTDIR`」最多只省 5%，不要做。
+    - 真正要避开的是 LZMA2。出路是把解压从安装时挪到运行时（见 §6.10）。
+    - 附带一条通用教训：**基准数据必须校验产出**。本轮第一次跑 robocopy 没检查退出码与目标文件数，得到「复制 1.1 万文件只要 1.1 秒」的荒谬结论，与历史记录的 24.7 秒差 20 倍。robocopy 的 0-7 都是成功码，8 以上才是失败；`Get-ChildItem` 又会因 260 字符长路径静默漏计，所以两边数字天然对不上，要以 robocopy 实际产出为准。
+58. **不要把 electron-builder 的 `extraResources.filter` 裁剪规则「顺手」改写成手写遍历而不做逐文件 diff**。那套 minimatch filter 的「按数组顺序、最后一次匹配生效」语义非常容易写错。
+    - 1.0.19 把 65 行 filter 迁到 `scripts/bundle-dsh-zst.js` 时**一次写错**，由「解包产物 vs 旧打包产物逐文件 diff」查出 4 类差异：DSH 本体根目录的 `README.md` 被误裁（md 规则漏了「只在 `node_modules/` 下生效」这一前提）、28 个 `@deepseek-ai/*` 的 `*.d.ts.map` 被误裁（`.map` 的负向 pattern 在 `@deepseek-ai` 豁免**之前**，对上游不生效，我却当成了全局）、node-pty 的 `darwin-*/linux-*/win32-arm64` prebuilds 与 `.editorconfig` 漏迁（多出 11 个文件）。
+    - **原 filter 的真实时序**是三段：① 负向（`*.map` / `*.md` / `test` / `.github` / `.eslintrc*` / `.nycrc*` / `.editorconfig`，**只对第三方包生效**）→ ② 正向豁免 `**/node_modules/@deepseek-ai/**`（使 ① 对上游失效）→ ③ 再负向（`dist-types` / `*.d.ts` / `*.pdb` / node-pty `build`+`third_party` / libreoffice-kit 平台包，**对所有包生效**）。手写实现必须按这三段还原，不能笼统地「把所有排除规则都当全局」。
+    - **验收标准应当是逐文件 diff，不是体积**。体积对上了也可能少了几百个文件（正好是这次的情况：第一次错版体积只差 0.6 MB，diff 立刻抓出 41 个文件的问题）。
+    - 手写 ustar 时注意 `name` 字段只有 100 字节、`prefix` 155 字节，**从后往前找第一个 `/` 拆分**才能保证 name 段 ≤100 字节；`String.lastIndexOf('/', len-100)` 这种写法会因为 position 语义用错而直接失败（本例 `@aws-sdk/client-bedrock-runtime/.../InvokeModelWithBidirectionalStreamCommand.js` 104 字符就踩到了）。
+59. **不要用默认参数的 `fs.rm` / `fs.unlink` 去删「刚写完的大目录」**。**`fs.rm` 的 `maxRetries` 默认为 0**，即遇到 EPERM/EBUSY 立即失败、不重试。
+    - 删 1.1 万个文件（155 MB）时，杀软（腾讯电脑管家）扫描新写文件必然瞬时占用其中某几个，于是**整个删除中途失败**。本轮实测症状极具迷惑性：**文件全被删光了，只剩一个空目录**，而且因为当时写了 `.catch(() => {})` 把错误吞掉，表现为「每次应用升级都在 `%LOCALAPPDATA%` 静默泄漏一份出厂树」。
+    - 正确做法：`fsp.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })`。加上后同一场景零残留。
+    - **删除失败必须留日志**（`console.warn` 带上目录名与 errno）。静默的删除失败和静默的写入失败一样：功能看起来完全正常，磁盘慢慢被吃光，没有任何症状提示。
+    - 诊断线索：「目录存在但里面 0 个文件」= 删除进行到一半失败，不是「本来就没东西」。
+    - 配套：**清扫逻辑要放在「已就绪就 return」的分支之前**。否则正常启动路径永远不执行清扫，残留永远等不到被清。本项目 `ensureBundledDshExtracted()` 的 `sweepStaleDirs()` 因此被提到标记比对之前——它原本排在后面，导致每次升级必泄漏。
+
 
 ### 12.2 改之前要确认
 
@@ -795,6 +896,8 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 - 需要「先切页面、再弹对话框」→ 必须 `loadXxxPage()` 后紧跟 `await waitForNextDialogHost()`，见 §6.7「先后顺序」行。
 - 新增 `showDshMessageBox` 调用点 → 显式判断该 `detail` 属于风险类（传 `detailTone: 'notice'`）还是版本信息类（缺省 `meta`），并把对应 spec 补进 `scripts/preview-dialog.js` 的 `CASES`（见 §12.1 第 41 条）。
 - 修改 `injected-theme.ts` 的 `--dsh-dlg-*` 令牌 → 同时影响自绘对话框的明暗两套；`--dsh-modal-*` 还被更新日志/关于模态框共用，误改会波及那两个。**玻璃透明度与文字色是耦合的**，单改一个会让对比度不达标，见 §12.1 第 40 条。改完跑 `node scripts/preview-dialog.js` 看 `docs/dialog-preview.html`（含高饱和渐变与深色代码块的最坏情况背景）。
+- 升级 Electron 大版本 → 必须同时做三件事：查官方 `breaking-changes.md` 对应区间并对本项目逐条 grep；单独量 `node_modules/electron/dist/electron.exe` 体积对比基线；确认 `node_modules/electron/dist/` 已就位（见 §12.1 第 51、52 条）。目标是回到**官方支持窗口内**（最新 3 个稳定大版本），不是追最新版本号。
+- 改 `dsh-components.ts` 的组件清单 / `NODE_PATH` 注入 / `electron-builder.yml` 的组件排除规则 → 三者必须**同时**改。漏掉排除规则等于白写下载逻辑；漏掉 `NODE_PATH` 则下载装好了 DSH 仍然报缺件。另外要实跑一次「无组件 → 触发下载 → 转换成功」，只验证 `isLibreOfficeKitReady()` 返回 true 不足以证明端到端可用（`prebuilds.json` 的 sha256 指纹运行时不校验，但 LibreOffice 自身的 `program/` 完整性不是我们能断言的）。
 
 ---
 

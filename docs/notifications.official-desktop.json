@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "notices": [
+    {
+      "id": "2026-10-08-official-desktop",
+      "type": "banner",
+      "level": "info",
+      "title": "DeepSeek 官方推出了 Harness 桌面端",
+      "body": "DeepSeek 官方已发布 DeepSeek Harness 桌面端，支持后台运行与本地文件读写，官网可直接下载。\n两种桌面端都能正常使用，选哪个取决于你的使用习惯；继续使用 DSH Desktop 不受影响。",
+      "link": { "label": "前往官网查看", "url": "https://www.deepseek.com/harness/" },
+      "startsAt": "2026-10-08T00:00:00Z",
+      "expiresAt": "2027-01-08T23:59:59Z",
+      "dismissible": true
+    }
+  ]
+}

@@ -20,6 +20,8 @@ msi/
 resources/node/
 # 预安装的 DSH 包（构建时通过 scripts/preinstall-dsh.js 下载）
 resources/dsh-bundled/
+# 出厂 DSH 的 zstd 单文件载荷（构建时由 scripts/bundle-dsh-zst.js 从上目录打包，1.0.19 起）
+resources/dsh-bundled.tar.zst
 
 # TypeScript 增量编译缓存
 *.tsbuildinfo

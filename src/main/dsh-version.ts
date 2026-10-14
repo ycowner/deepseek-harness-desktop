@@ -218,24 +218,43 @@ function fetchLatestVersionFromRegistry(registry: string): Promise<string> {
  * @returns integrity 字符串，形如 "sha512-<base64>"；缺失时抛异常
  */
 export function fetchDistIntegrity(version: string): Promise<string> {
-  return fetchDistIntegrityFromRegistry(NPM_REGISTRY_MIRROR, version)
+  return fetchPackageDistIntegrity(DSH_PACKAGE, version)
+}
+
+/**
+ * 获取**任意** npm 包指定版本的 dist.integrity（sha512，base64）
+ *
+ * 与 fetchDistIntegrity 的唯一区别是包名不再硬编码为 @deepseek-ai/dsh，
+ * 供按需组件（如 libreoffice-kit 平台包）复用同一套双源 + abbreviated packument 逻辑。
+ * 优先国内镜像，失败回退 npm registry。
+ *
+ * @param packageName 完整包名（含 scope），如 "@deepseek-ai/libreoffice-kit-win32-x64"
+ * @param version 版本号，如 "0.1.3"
+ * @returns integrity 字符串，形如 "sha512-<base64>"；缺失时抛异常
+ */
+export function fetchPackageDistIntegrity(packageName: string, version: string): Promise<string> {
+  return fetchPackageDistIntegrityFromRegistry(NPM_REGISTRY_MIRROR, packageName, version)
     .catch((mirrorErr) => {
-      console.warn(`[DSH] 国内镜像查询包完整性失败，回退到 npm registry: ${mirrorErr.message}`)
-      return fetchDistIntegrityFromRegistry(NPM_REGISTRY, version)
+      console.warn(`[DSH] 国内镜像查询 ${packageName} 包完整性失败，回退到 npm registry: ${mirrorErr.message}`)
+      return fetchPackageDistIntegrityFromRegistry(NPM_REGISTRY, packageName, version)
     })
 }
 
 /**
- * 从指定 registry 获取指定版本的 dist.integrity（内部实现）
+ * 从指定 registry 获取指定包的指定版本的 dist.integrity（内部实现）
  */
-async function fetchDistIntegrityFromRegistry(registry: string, version: string): Promise<string> {
-  const url = `${registry}/${encodeURIComponent(DSH_PACKAGE).replace('%40', '@')}`
+async function fetchPackageDistIntegrityFromRegistry(
+  registry: string,
+  packageName: string,
+  version: string
+): Promise<string> {
+  const url = `${registry}/${encodeURIComponent(packageName).replace('%40', '@')}`
   const data = (await fetchJson(url, { Accept: 'application/vnd.npm.install-v1+json' })) as {
     versions?: Record<string, { dist?: { integrity?: string } }>
   }
   const integrity = data.versions?.[version]?.dist?.integrity
   if (!integrity) {
-    throw new Error(`未找到 ${DSH_PACKAGE}@${version} 的 dist.integrity`)
+    throw new Error(`未找到 ${packageName}@${version} 的 dist.integrity`)
   }
   return integrity
 }

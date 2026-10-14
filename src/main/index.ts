@@ -3,6 +3,8 @@ import { join } from 'path'
 import type { DshDialogOptions } from './dsh-dialog'
 import { startDsh, stopDsh, waitForDshReady, DSH_PACKAGE_MISSING_ERROR_NAME } from './dsh-manager'
 import { prepareDshPackage, activateDshPackage, repairDsh, discardRetiredDshDir } from './dsh-repair'
+import { installLibreOfficeKit, prefetchComponentsInBackground, getComponentStatus, reconcileComponentsAfterDshUpdate } from './dsh-components'
+import { ensureBundledDshExtracted } from './dsh-unpack'
 import { getBundledRuntimeInfo } from './node-binary'
 import { checkForUpdate, getInstalledDshVersion, isValidVersion, compareVersions } from './dsh-version'
 import { checkForAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, UPDATE_FEED_URL } from './app-update'
@@ -758,7 +760,7 @@ async function promptInstallTiming(): Promise<void> {
       type: 'info',
       title: '更新已就绪',
       message: `DSH Desktop 客户端 v${pendingAppUpdateVersion || snap.version || ''} 已下载完成`,
-      detail: `当前版本: v${getInstalledAppVersion()}\n\n可立即重启安装，也可等下次退出 DSH Desktop 时静默安装。`,
+      detail: `当前版本: v${getInstalledAppVersion()}\n\n可立即重启安装，也可等下次退出 DSH Desktop 时静默安装。\n安装时 Windows 会请求管理员授权（UAC）。`,
       buttons: ['立即重启安装', '下次启动时安装', '取消'],
       defaultId: 0,
       cancelId: 2
@@ -910,7 +912,7 @@ async function manualCheckAppUpdate(): Promise<void> {
         type: 'info',
         title: '发现新版本',
         message: 'DSH Desktop 客户端有新版本可用',
-        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n尚未开始下载（约 251 MB）。点击标题栏的「更新」按钮即可开始下载并查看进度。`,
+        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n尚未开始下载。点击标题栏的「更新」按钮即可开始下载并查看进度。`,
         buttons: ['确定'],
         defaultId: 0
       })
@@ -1027,6 +1029,68 @@ async function showChangelog(kind: 'dsh' | 'app'): Promise<void> {
     )
   } finally {
     isShowingChangelog = false
+  }
+}
+
+/**
+ * 帮助菜单「文档预览组件」入口：按需安装 libreoffice-kit 平台包
+ *
+ * 该平台包（181.5 MB）1.0.19 起不再随安装包分发，改为首次使用时下载。
+ * 缺件不影响启动，也不影响 PDF/Excel 预览——只有 Word/Excel/PPT 转 PDF
+ * 会失败（上游报 `Required LibreOfficeKit native package is missing`）。
+ * 因此这里做成「用户主动触发 + 后台预取」两条路径：
+ * - 后台预取在 DSH 就绪后静默跑，失败不打扰（见 prefetchComponentsInBackground）
+ * - 本入口供用户手动重试 / 提前装好
+ *
+ * 进度走注入式模态框（与更新日志同款 720px 大卡），每条进度回调更新一次正文，
+ * 不用原生 dialog——那是一次性内容，装 181 MB 期间会一直停在同一句话。
+ */
+async function showComponentInstaller(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed() || !dshView) return
+
+  const status = getComponentStatus()
+  if (status.libreOfficeKitReady) {
+    await showDshMessageBox({
+      type: 'info',
+      title: '文档预览组件',
+      message: '文档预览组件已安装',
+      detail: `Word / Excel / PowerPoint 转 PDF 功能可用${status.requiredVersion ? `（组件版本 ${status.requiredVersion}）` : ''}。`
+    })
+    return
+  }
+
+  // 先切模态框再开下载：与 showChangelog 同构，避免"下载中无任何反馈"
+  await injectModalShell(
+    dshView.webContents,
+    '文档预览组件',
+    '<p style="color:var(--dsh-dlg-muted)">正在准备下载...</p>',
+    'info'
+  )
+
+  let lastText = ''
+  const updateProgress = (msg: string): void => {
+    if (msg === lastText) return
+    lastText = msg
+    if (!dshView || dshView.webContents.isDestroyed()) return
+    void updateModalBody(
+      dshView.webContents,
+      `<p style="color:var(--dsh-dlg-muted)">${escapeHtml(msg)}</p>`
+    )
+  }
+
+  const result = await installLibreOfficeKit(updateProgress)
+  if (!dshView || dshView.webContents.isDestroyed()) return
+  if (result.success) {
+    await updateModalBody(
+      dshView.webContents,
+      '<p style="color:#4ade80">安装完成。现在可以在 DSH 中预览 Word / Excel / PowerPoint 文档。</p>'
+    )
+  } else {
+    await updateModalBody(
+      dshView.webContents,
+      `<p style="color:#f87171">安装失败：${escapeHtml(result.error ?? '未知错误')}</p>
+       <p style="color:var(--dsh-dlg-muted);margin-top:8px">可稍后从本菜单重试。文档转换失败不影响其他功能。</p>`
+    )
   }
 }
 
@@ -1423,6 +1487,19 @@ async function startDshAndLoad(): Promise<void> {
   try {
     sendStatus('正在启动 DSH 服务...')
 
+    // 出厂 DSH 树首次解包（1.0.19）：出厂 DSH 以单个 dsh-bundled.tar.zst 随安装包
+    // 分发（1.1 万个小文件会让 NSIS 载荷极慢），首次启动时展开到 %LOCALAPPDATA%。
+    // 必须在 startDsh() 之前——findCachedDshEntry() 依赖 getBundledDshDir() 能解析到
+    // 已解包目录。幂等：已解包时只是一次 statSync（约 20ms），后续每次启动都秒过。
+    // 只在应用启动路径做：出厂 zst 仅随应用升级变化，DSH 在线更新不影响它。
+    try {
+      await ensureBundledDshExtracted(sendStatus)
+    } catch (err) {
+      // 解包失败不直接判死：下面 startDsh() 仍会尝试复用已运行的 DSH 或 npx 缓存，
+      // 只有全部落空才落到 DSH_PACKAGE_MISSING 的在线修复流程。
+      console.error(`[DSH] 出厂组件解包失败：${(err as Error).message}`)
+    }
+
     const dshProcess = await startDsh()
 
     sendStatus(`服务已启动，正在等待就绪 (${dshProcess.url})...`)
@@ -1449,6 +1526,11 @@ async function startDshAndLoad(): Promise<void> {
       checkDshUpdateAndPrompt()
       // 异步检查桌面应用自身更新（不阻塞启动流程；此处只拉 latest.yml 266 字节，不下载安装包）
       void checkForAppUpdateAndPrompt()
+      // 后台预取按需组件（1.0.19：libreoffice-kit 平台包不再随安装包分发）。
+      // 放在 UI 就绪之后：预取全程静默、失败不弹窗，但 npm install 会占一段磁盘 IO，
+      // 排在 loadURL 后面可避免和首屏渲染抢资源。功能内部有「本次进程只试一次」的
+      // 闸门，重复进 startDshAndLoad（如托盘重建窗口）不会重复下载。
+      prefetchComponentsInBackground()
       // 拉一次公告：横幅直接投到 DSH 页，紧急通知延迟 NOTICE_MODAL_DELAY_MS 再弹。
       // 同样不阻塞启动（拉取失败在 checkNoticesAndShow 内已静默处理）。
       void checkNoticesAndShow('startup')
@@ -1565,6 +1647,11 @@ async function performUpdate(): Promise<void> {
     pendingDshUpdateVersion = null
     lastPromptedDshVersion = null
     pushTitlebarUpdateState()
+
+    // 按需组件（文档预览）对齐：DSH 换了版本，libreoffice-kit 的版本约束可能也变了。
+    // 必须放在 startDsh() 之后——getActiveDshPackageRoot() 要先记到新那棵树。
+    // 与首启预取同理放在 UI 就绪之后，避免跟首屏渲染抢磁盘 IO。
+    reconcileComponentsAfterDshUpdate()
 
     // 更新完成后再次检查版本（走带抑制逻辑的检查，避免同一版本重复推送状态）
     checkDshUpdateAndPrompt()
@@ -2180,7 +2267,7 @@ ipcMain.on('titlebar-client-update', async (event) => {
       type: 'info',
       title: '发现新版本',
       message: `DSH Desktop 客户端 v${pendingAppUpdateVersion || snap.version || ''} 可更新`,
-      detail: `当前版本: v${getInstalledAppVersion()}\n\n下载约需 251 MB。点击「下载并更新」开始下载，下载期间 DSH 页面顶部会显示进度。`,
+      detail: `当前版本: v${getInstalledAppVersion()}\n\n点击「下载并更新」开始下载，下载期间 DSH 页面顶部会显示进度。`,
       buttons: ['下载并更新', '取消'],
       defaultId: 0,
       cancelId: 1
@@ -2280,6 +2367,7 @@ ipcMain.on('titlebar-dsh-update', async (event) => {
  * 在按钮正下方弹出原生菜单：
  * - 检查更新... → 弹 dialog 选择检查项（原有检查逻辑不变）
  * - 更新日志 → 子菜单：DSH 运行包日志 / DSH Desktop 客户端日志
+ * - 文档预览组件... → 按需安装 libreoffice-kit 平台包（后台预取失败时的重试入口）
  * - 关于 DSH Desktop → 关于模态框（客户端版本 + DSH 运行包版本 + 内置 Node 运行时 + GitHub 仓库）
  */
 ipcMain.on('show-help-menu', (event, position: { x: number; y: number; width: number }) => {
@@ -2303,6 +2391,12 @@ ipcMain.on('show-help-menu', (event, position: { x: number; y: number; width: nu
         { label: 'DSH 运行包日志', click: () => { void showChangelog('dsh') } },
         { label: 'DSH Desktop 客户端日志', click: () => { void showChangelog('app') } }
       ]
+    },
+    {
+      // 1.0.19 起 libreoffice-kit 平台包（181.5 MB）不再随安装包分发，改为按需下载；
+      // 后台预取失败时这里是用户唯一的重试入口，勿删。
+      label: '文档预览组件...',
+      click: () => { void showComponentInstaller() }
     },
     { type: 'separator' },
     { label: '关于 DSH Desktop', click: () => { void showAboutModal() } }
