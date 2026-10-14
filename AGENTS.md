@@ -57,6 +57,8 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 ├── scripts/                     ← 构建辅助脚本（CommonJS）
 │   ├── download-node.js         ← 下载内置 Node.js（npmmirror → nodejs.org 双源）
 │   ├── preinstall-dsh.js        ← 预下载 DSH 包到 resources/dsh-bundled/
+│   ├── bundle-dsh-zst.js        ← 把 dsh-bundled/ 打成 zstd 单文件（1.0.19；原 65 行 extraResources 裁剪规则迁到这里）
+│   ├── after-pack.js            ← electron-builder afterPack 钩子，删 win-unpacked 内可选运行时文件（当前仅 dxcompiler.dll）
 │   ├── archive-dist-exe.js      ← 把 dist-exe 归档到 dist-exe-archives/<时间戳>/
 │   ├── patch-latest-yml-size.js ← 补齐 latest.yml 缺失的 files[].size（differentialPackage: false 的副作用）
 │   ├── verify-release.js        ← 上传前校验：sha512 / size / version 一致性，打印有序上传步骤
@@ -90,7 +92,8 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │       └── renderer.ts          ← 仅 console.log 占位
 ├── resources/                   ← 运行时资源（被 .gitignore，产物）
 │   ├── node/                    ← 内置 Node.js（由 download-node.js 生成）
-│   └── dsh-bundled/             ← 预装 DSH 包（由 preinstall-dsh.js 生成）
+│   ├── dsh-bundled/             ← 预装 DSH 包（由 preinstall-dsh.js 生成，开发期直接用它）
+│   └── dsh-bundled.tar.zst      ← 出厂 DSH 的 zstd 单文件载荷（由 bundle-dsh-zst.js 生成，随安装包分发，见 §6.10）
 ```
 
 > 根目录有 `dist/`、`dist-electron/`、`dist-exe*/`、`msi/`、`.eb-cache/` 等大量历史构建产物目录，**全部是构建或归档产物，不要当作源码修改**。
@@ -106,9 +109,10 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `start`          | `electron-vite preview`                                                       | 用生产模式跑已构建产物（不打包）                                   |
 | `download-node`  | `node scripts/download-node.js`                                               | 下载内置 Node.js 到 `resources/node/`；`--force` 强制重下    |
 | `preinstall-dsh` | `node scripts/preinstall-dsh.js`                                              | 预下载 DSH 包到 `resources/dsh-bundled/`                |
+| `bundle-dsh-zst` | `node scripts/bundle-dsh-zst.js`                                              | 把 `resources/dsh-bundled/` 打成 `resources/dsh-bundled.tar.zst`（1.0.19 起，裁剪规则在此处生效，见 §6.10） |
 | `package`        | `electron-vite build && electron-builder && node scripts/archive-dist-exe.js` | 完整发布：编译 → 打包 NSIS → 归档到 `dist-exe-archives/<时间戳>/` |
 | `postinstall`    | `node scripts/download-node.js`                                               | `npm install` 后自动跑，确保开发期 `resources/node/` 存在      |
-| `prepackage`     | `node scripts/download-node.js && node scripts/preinstall-dsh.js`             | `npm run package` 前自动跑，确保打包资源就绪                    |
+| `prepackage`     | `node scripts/download-node.js && node scripts/preinstall-dsh.js && node scripts/bundle-dsh-zst.js` | `npm run package` 前自动跑，确保打包资源就绪（含 zstd 载荷）   |
 
 **典型工作流**：
 
@@ -502,14 +506,14 @@ Shadow DOM 迁移的代价：**外部选择器全部失效**，唯一入口是 `
 - 主进程代码 → `dist/` → 打包进 `asar`
 - 运行时资源 → `extraResources`：
   - `node/`（内置 Node + 完整 npm；已排除 corepack / 文档 / 类型声明）
-  - `dsh-bundled/`（预装 DSH 包；已排除类型声明，以及第三方包内的 sourcemap / 文档 / 测试目录 / lint 配置 / node-pty 非 win32-x64 预编译产物，见 §8.2.3）
+  - `dsh-bundled.tar.zst`（出厂 DSH 的 zstd 单文件载荷，37.5MB；原先 65 行 filter 的裁剪规则——类型声明、第三方包 sourcemap / 文档 / 测试目录 / lint 配置、node-pty 非 win32-x64 预编译产物——已逐条迁到 `scripts/bundle-dsh-zst.js`，在打 tar 之前生效，见 §6.10 与 §8.2.3）
   - `icon.ico`（窗口图标，主进程通过 `process.resourcesPath/icon.ico` 读取）
 - 安装包：NSIS、`perMachine: true`、`oneClick: false`、`allowToChangeInstallationDirectory: true`
 - 安装载荷：`nsis.useZip: true` + `nsis.differentialPackage: false`，安装时由 `nsisunz::Unzip` 直接解压到安装目录（见 §8.2.1，两者必须同时设置）
 - Chromium 语言包：`win.electronLanguages` 只保留 `zh-CN` / `zh-TW` / `en-US`（默认 55 个 `.pak` / 41MB → 3 个 / 1.5MB）。只影响 Chromium 原生 UI 文案（网页右键菜单、内置错误页），DSH Web UI 自身 i18n 与此无关；`en-US` 是 Electron 兜底语言，不可删。
 - 安装包命名：`DSH-Desktop-Setup-<version>.exe`（`artifactName` 连字符格式，避免上传平台对空格的处理）
 - 发布配置：`publish` 段为 `provider: generic` + `url: https://download.dsh.392700.xyz`（electron-updater 每次检查只 `GET {url}/latest.yml`，换源只改这一个字符串）。**url 必须是自定义域名**，不能填 `r2.dev`（官方标注非生产用途，有可变速率限制且带宽同样被限速）。产物未签名故**不设 `win.publisherName`**——该字段一旦写入而产物无有效签名，electron-updater 会判定签名校验失败并直接拒绝安装。
-- 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 **170MB**（zip 载荷，比 7z 时期的 145MB 大，换来安装耗时从 360s 降到 24s，见 §8.2）。
+- 体积说明：`extraResources` 缓存了核心 `node/` 内 npm（约 11MB）以满足 dsh 在线更新补依赖；排除了 corepack、文档、类型声明等无用文件（详见 `electron-builder.yml` 注释）。安装包约 **208.6 MB**（1.0.19，1.0.18 为 263.5 MB，-54.9 MB / -20.8%）：来自出厂 DSH 换 zstd 单载荷（§6.10）与 libreoffice-kit 改按需下载（§6.9），而 Electron 44 反而让 `electron.exe` 比 33 大 +54 MB（§12.1 第 52 条）；逐项体积模型见 `docs/INSTALLER-SIZE-ANALYSIS.md`。zip 载荷仍比 7z 时期的 145MB 大，换来安装耗时从 360s 降到 24s，见 §8.2。
 
 ### 8.1 任务栏固定图标保留（NSIS 跨升级）
 
