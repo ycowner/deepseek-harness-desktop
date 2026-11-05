@@ -28,6 +28,13 @@ import { dialog, ipcMain } from 'electron'
 import type { BrowserWindow, WebContents } from 'electron'
 import { getEffectiveTheme } from './theme-manager'
 import { INJECTED_THEME_VARS, ICONS, FONT_STACK } from './injected-theme'
+import {
+  buildUpdatePanelSpec,
+  UPDATE_PANEL_CSS,
+  UPDATE_PANEL_SCRIPT,
+  type UpdatePanelOptions,
+  type UpdatePanelResult
+} from './update-panel'
 
 // ICONS / FONT_STACK 定义在 injected-theme，与模态框层（injected-modal）共用，
 // 也让预览脚本只加载那一个文件就拿得到全部注入式资产。
@@ -84,12 +91,12 @@ interface DshDialogHost {
 }
 
 /**
- * 按钮变体。
+ * 按钮变体（与参考图对齐：三档同高同圆角、全部实底）
  *
- * 'lead'   主按钮，填色 + 最大尺寸（13px / 34px / min-width 112px）
- * 'minor'  次级操作，描边 + 小一号（12px / 30px）
- * 'ghost'  取消，纯文字
- * 尺寸差是刻意的不对称：主按钮靠"填色 + 更大"表达优先级。
+ * 'lead'   主按钮：白底深字 / 浅色反转的近黑底白字，min-width 撑成全组最宽
+ * 'minor'  次级操作：浅灰实底
+ * 'ghost'  取消：浅灰实底（参考图里不再有纯文字按钮）
+ * 层级只靠填充色表达，尺寸不再做人为不对称。
  */
 export type DshDialogButtonVariant = 'lead' | 'minor' | 'ghost'
 
@@ -109,14 +116,32 @@ export interface DialogSpec {
   vars: Record<string, string>
 }
 
-/** 等待展示的请求 */
+/**
+ * 队列内部统一的结果形状
+ *
+ * 面板比消息框多带一个复选框勾选态（checked）。两者走同一个队列，队列必须用
+ * 同一个 resolve 签名，所以这里定义一份内部形状，由 showDshMessageBox /
+ * showUpdatePanel 各自裁剪成对外的返回类型。
+ */
+interface OverlayResult {
+  response: number
+  checked: boolean
+}
+
+/**
+ * 等待展示的请求
+ *
+ * kind 区分两种形态：'messagebox'（旧卡片）与 'panel'（更新面板）。二者共用
+ * 同一条队列，保证任意时刻只有一个浮层——面板与旧对话框不会叠在一起。
+ */
 interface Pending {
-  options: DshDialogOptions
-  resolve: (result: DshDialogResult) => void
+  kind: 'messagebox' | 'panel'
+  options: DshDialogOptions | UpdatePanelOptions
+  resolve: (result: OverlayResult) => void
 }
 
 /** 正在显示中的一个（页面侧已渲染，尚未收到用户选择） */
-type ActiveDialog = Pending & { id: number }
+type ActiveDialog = Pending & { id: number; buttonCount: number }
 
 let host: DshDialogHost | null = null
 
@@ -131,13 +156,17 @@ let seq = 0
 const hostWaiters: ((ready: boolean) => void)[] = []
 
 /**
- * 对话框样式：磨砂玻璃卡片（半透明底 + 背后高斯模糊 + 通透高光边），大圆角。
+ * 对话框样式
+ *
+ * 浅色：磨砂玻璃卡片（半透明底 + 背后高斯模糊 + 通透高光边），16px 圆角。
+ * 深色：按参考图改为**不透明纯黑实心 + 一圈极淡描边、无内高光**，卡片级
+ * 模糊由 --dsh-dlg-blur 置为 none；遮罩层的 6px 模糊两层都保留。
  *
  * 两层 backdrop-filter 是刻意叠加，不是重复：
- *   - `.backdrop` blur(6px) 让整屏背景"化开"，半透明卡片才有东西可折射；
- *   - `.card` blur(20px) + saturate(180%) 再单独模糊一次，玻璃感来自这里。
- * DSH 聊天页背景大面积平坦，玻璃的实际收益主要在边缘高光与前后层次，不是
- * 模糊出来的内容——所以外阴影与顶部 inset 高光是这套观感的骨架，不能省。
+ *   - `.backdrop` blur(6px) 让整屏背景"化开"；
+ *   - `.card` 的模糊由令牌控制（light 20px / dark none）。
+ * 描边、外阴影、inset 高光三行必须保留结构：深色的「淡描边 / 透明高光」
+ * 是靠令牌值实现的，删掉 CSS 行会让浅色一起丢。
  * 整段作为 Shadow Root 内的 <style> 注入，与宿主页面样式完全隔离。
  */
 export const DIALOG_CSS = `
@@ -155,10 +184,10 @@ export const DIALOG_CSS = `
   width: min(460px, 100%); max-height: min(76vh, 560px);
   display: flex; flex-direction: column;
   background: var(--dsh-dlg-glass);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: var(--dsh-dlg-blur);
+  backdrop-filter: var(--dsh-dlg-blur);
   border: 1px solid var(--dsh-dlg-glass-border);
-  border-radius: 24px;
+  border-radius: 16px;
   /* 外阴影托住卡片（脱离页面平面），inset 高光模拟顶部受光 */
   box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);
   color: var(--dsh-dlg-body);
@@ -214,23 +243,26 @@ export const DIALOG_CSS = `
 .card[data-tight="1"] .foot { flex-wrap: nowrap; gap: 8px; }
 /* 两个及以上按钮时加一条发丝线，把"内容"与"动作"分层 */
 .card[data-split="1"] .foot { border-top: 1px solid var(--dsh-dlg-hairline); margin-top: 18px; }
+/* 按钮规格对齐参考图：三档同高（34px）、同圆角（10px）、**全部实底**，
+   层级只靠填充色区分（主按钮白/黑，次级与取消为浅灰实底）。 */
 .btn {
   flex: none; white-space: nowrap;
-  border-radius: 12px; cursor: pointer; border: 1px solid transparent;
-  font-family: inherit; font-weight: 500; line-height: 1;
+  height: 34px; padding: 0 18px; border-radius: 10px;
+  cursor: pointer; border: 1px solid transparent;
+  font-family: inherit; font-size: 13px; font-weight: 500; line-height: 1;
   background: transparent; color: var(--dsh-dlg-body);
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-/* 主按钮：13px / 34px，且 min-width 把它撑成全组最宽——4 按钮时另外三个
-   按钮里有 5 汉字 + 拉丁字母的（如「检查DSH运行包」），纯内容排版下它会比
-   4 汉字的主按钮更宽，"主按钮最大"就不成立了 */
-.btn--lead { height: 34px; padding: 0 20px; min-width: 112px; font-size: 13px; background: var(--dsh-dlg-primary-bg); color: var(--dsh-dlg-primary-fg); }
+/* 主按钮：min-width 把它撑成全组最宽——4 按钮时另外三个按钮里有 5 汉字 +
+   拉丁字母的（如「检查DSH运行包」），纯内容排版下它会比 4 汉字主按钮更宽，
+   "主按钮最大"就不成立了 */
+.btn--lead { min-width: 112px; background: var(--dsh-dlg-primary-bg); color: var(--dsh-dlg-primary-fg); }
 .btn--lead:hover { background: var(--dsh-dlg-primary-hover); }
-/* 次级操作：描边 + 小一号。描边按钮在玻璃上必须用半透明面，实体色贴上去像补丁 */
-.btn--minor { height: 30px; padding: 0 14px; font-size: 12px; background: var(--dsh-dlg-btn-surface); border-color: var(--dsh-dlg-glass-border); }
-.btn--minor:hover { background: var(--dsh-dlg-btn-surface-hover); }
-.btn--ghost { height: 30px; padding: 0 14px; font-size: 12px; color: var(--dsh-dlg-muted); }
-.btn--ghost:hover { background: var(--dsh-dlg-hover); color: var(--dsh-dlg-body); }
+/* 次级与取消：参考图里两者同为浅灰实底，不再有纯文字按钮 */
+.btn--minor,
+.btn--ghost { background: var(--dsh-dlg-btn-surface); color: var(--dsh-dlg-body); }
+.btn--minor:hover,
+.btn--ghost:hover { background: var(--dsh-dlg-btn-surface-hover); }
 .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }
 @keyframes dlg-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes dlg-pop {
@@ -254,7 +286,7 @@ export function buildHostScript(): string {
   return `
 (function () {
   if (window.__dshDialogHost) return
-  var CSS = ${JSON.stringify(DIALOG_CSS)}
+  var CSS = ${JSON.stringify(DIALOG_CSS + UPDATE_PANEL_CSS)}
   var ICONS = ${JSON.stringify(ICONS)}
 
   function svg (name) {
@@ -269,6 +301,8 @@ export function buildHostScript(): string {
     el.innerHTML = ICONS[name] || ''
     return el
   }
+
+${UPDATE_PANEL_SCRIPT}
 
   function open (spec) {
     // 同一时刻只允许一个对话框，与既有模态框的单一实例策略一致
@@ -290,6 +324,34 @@ export function buildHostScript(): string {
     var backdrop = document.createElement('div')
     backdrop.className = 'backdrop'
 
+    // 面板的复选框勾选态由宿主脚本持有：Esc 与遮罩点击也要把勾选态回传，
+    // 状态藏在面板构造器的闭包里就取不到了。
+    var panelState = { checked: false }
+
+    var settled = false
+    function settle (index) {
+      if (settled) return
+      settled = true
+      document.removeEventListener('keydown', onKey, true)
+      hostEl.remove()
+      var api = window.dsh
+      if (api && typeof api.dialogResult === 'function') {
+        // 面板多带一个 checked；消息框不带（payload 为 undefined）
+        api.dialogResult(spec.id, index, spec.kind === 'panel' ? { checked: !!panelState.checked } : undefined)
+      }
+    }
+
+    // 焦点循环元素与初始焦点目标，由两条分支各自填好
+    var focusables = []
+    var initialFocus = null
+
+    if (spec.kind === 'panel') {
+      var built = buildPanelCard(spec, svg, panelState, settle)
+      backdrop.appendChild(built.card)
+      focusables = built.focusables
+      // defaultId 是 spec.buttons 的下标，与面板按钮数组一一对应
+      initialFocus = built.buttons[spec.defaultId] || null
+    } else {
     var card = document.createElement('div')
     card.className = 'card'
     card.setAttribute('role', 'dialog')
@@ -367,20 +429,14 @@ export function buildHostScript(): string {
     card.appendChild(body)
     card.appendChild(foot)
     backdrop.appendChild(card)
+    focusables = btnEls
+    initialFocus = btnEls[spec.defaultId] || null
+    }
+
     root.appendChild(style)
     root.appendChild(backdrop)
 
-    var settled = false
-    function settle (index) {
-      if (settled) return
-      settled = true
-      document.removeEventListener('keydown', onKey, true)
-      hostEl.remove()
-      var api = window.dsh
-      if (api && typeof api.dialogResult === 'function') api.dialogResult(spec.id, index)
-    }
-
-    // Esc 走 cancelId；Tab 在按钮之间闭环（模态必须锁住焦点）
+    // Esc 走 cancelId；Tab 在可聚焦元素之间闭环（模态必须锁住焦点）
     function onKey (e) {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -388,9 +444,9 @@ export function buildHostScript(): string {
         settle(spec.cancelId)
         return
       }
-      if (e.key !== 'Tab' || !btnEls.length) return
-      var first = btnEls[0]
-      var last = btnEls[btnEls.length - 1]
+      if (e.key !== 'Tab' || !focusables.length) return
+      var first = focusables[0]
+      var last = focusables[focusables.length - 1]
       var current = root.activeElement
       if (e.shiftKey && (current === first || !current)) {
         e.preventDefault()
@@ -410,7 +466,7 @@ export function buildHostScript(): string {
       if (e.target === backdrop) settle(spec.cancelId)
     })
     // 初始焦点给 defaultId（与原生一致：回车即触发它）
-    if (btnEls[spec.defaultId]) btnEls[spec.defaultId].focus()
+    if (initialFocus) initialFocus.focus()
   }
 
   window.__dshDialogHost = { open: open }
@@ -482,15 +538,18 @@ export function waitForNextDialogHost(timeoutMs = 5000): Promise<boolean> {
 export function initDshDialog(dialogHost: DshDialogHost): void {
   host = dialogHost
 
-  ipcMain.on('dsh-dialog-response', (event, id: unknown, index: unknown) => {
+  ipcMain.on('dsh-dialog-response', (event, id: unknown, index: unknown, payload: unknown) => {
     // 严格比对内容视图的 webContents：只有被注入宿主的那个页面能回传按钮结果
     const wc = host?.getWebContents()
     if (!wc || event.sender !== wc) return
     if (typeof id !== 'number' || typeof index !== 'number') return
     if (!active || active.id !== id) return // 过期点击（对话框已被导航销毁或已关闭）
+    // 下标必须落在当前活动的按钮数组内。页内是第三方 DSH 内容，
+    // 回传值必须当不可信输入校验（比此前只校验类型更严）。
+    if (!Number.isInteger(index) || index < 0 || index >= active.buttonCount) return
     const finished = active
     active = null
-    finished.resolve({ response: index })
+    finished.resolve({ response: index, checked: readCheckedPayload(payload) })
     void pump()
   })
 
@@ -503,8 +562,22 @@ export function initDshDialog(dialogHost: DshDialogHost): void {
     const interrupted = active ? [active] : []
     active = null
     queue.length = 0
-    for (const p of interrupted) p.resolve({ response: resolveCancelId(p.options) })
+    for (const p of interrupted) {
+      p.resolve({ response: resolveCancelId(p.kind, p.options), checked: false })
+    }
   })
+}
+
+/**
+ * 从回传 payload 里取复选框勾选态
+ *
+ * 页内是第三方 DSH 内容，payload 必须当不可信输入处理：非对象、或 checked
+ * 不是 boolean，一律按 false 处理（等价于用户没勾）。
+ */
+function readCheckedPayload(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false
+  const checked = (payload as { checked?: unknown }).checked
+  return typeof checked === 'boolean' ? checked : false
 }
 
 /** 从队列里取下一个并展示 */
@@ -513,13 +586,19 @@ async function pump(): Promise<void> {
   const next = queue.shift()
   if (!next) return
 
-  const spec = buildDialogSpec(next.options)
+  const spec = next.kind === 'panel'
+    ? buildUpdatePanelSpec(next.options as UpdatePanelOptions, ++seq)
+    : buildDialogSpec(next.options as DshDialogOptions)
   const wc = host?.getWebContents()
   const canRender = hostReady && !!wc && !wc.isDestroyed()
 
   // 先占位再 await：页面侧渲染完成到主进程记下 active 之间有一个微任务窗口，
   // 顺序反了会让这段时间内的点击既没被记录、遮罩又已消失（Promise 永久挂起）
-  const token: ActiveDialog = { ...next, id: spec.id }
+  const token: ActiveDialog = {
+    ...next,
+    id: spec.id,
+    buttonCount: spec.buttons.length
+  }
   active = token
 
   if (canRender) {
@@ -540,12 +619,12 @@ async function pump(): Promise<void> {
   try {
     const parent = host?.getParentWindow()
     const result = parent
-      ? await dialog.showMessageBox(parent, toNativeOptions(next.options))
-      : await dialog.showMessageBox(toNativeOptions(next.options))
-    token.resolve({ response: result.response })
+      ? await dialog.showMessageBox(parent, toNativeOptions(next.kind, next.options))
+      : await dialog.showMessageBox(toNativeOptions(next.kind, next.options))
+    token.resolve({ response: result.response, checked: false })
   } catch (err) {
     console.error(`[DSH] 系统兜底弹窗异常: ${(err as Error).message}`)
-    token.resolve({ response: resolveCancelId(next.options) })
+    token.resolve({ response: resolveCancelId(next.kind, next.options), checked: false })
   } finally {
     if (active === token) active = null
     void pump()
@@ -591,10 +670,21 @@ export function buildDialogSpec(options: DshDialogOptions): DialogSpec {
   }
 }
 
-/** 导航打断时的收敛值：调用点没给 cancelId 就取最后一个按钮 */
-function resolveCancelId(options: DshDialogOptions): number {
-  const buttons = options.buttons && options.buttons.length ? options.buttons : ['确定']
-  return pickIndex(options.cancelId, buttons.length - 1, buttons.length - 1)
+/**
+ * 导航打断时的收敛值：调用点没给 cancelId 就取最后一个按钮
+ *
+ * 面板的 cancelId 是必填的（键盘语义必须逐个显式声明），这里仍做一次钳位
+ * 兜底，防止调用点传入越界下标导致收敛到不存在的按钮。
+ */
+function resolveCancelId(kind: 'messagebox' | 'panel', options: DshDialogOptions | UpdatePanelOptions): number {
+  if (kind === 'panel') {
+    const panelOptions = options as UpdatePanelOptions
+    const buttons = panelOptions.buttons && panelOptions.buttons.length ? panelOptions.buttons : []
+    return pickIndex(panelOptions.cancelId, buttons.length - 1, buttons.length - 1)
+  }
+  const dialogOptions = options as DshDialogOptions
+  const buttons = dialogOptions.buttons && dialogOptions.buttons.length ? dialogOptions.buttons : ['确定']
+  return pickIndex(dialogOptions.cancelId, buttons.length - 1, buttons.length - 1)
 }
 
 /**
@@ -612,15 +702,40 @@ function pickIndex(value: number | undefined, fallback: number, maxIndex: number
   return Math.min(Math.max(value, 0), maxIndex)
 }
 
-function toNativeOptions(options: DshDialogOptions): Electron.MessageBoxOptions {
+/**
+ * 系统弹窗兜底用的原生选项
+ *
+ * 面板回落到原生弹窗时，图标、日期行、复选框这些都表达不了——这是降级路径，
+ * 语义（哪个按钮对应什么动作、默认焦点、Esc 行为）必须保持一致，否则用户在
+ * 同一个界面里会看到两套不同的键盘行为。
+ */
+function toNativeOptions(
+  kind: 'messagebox' | 'panel',
+  options: DshDialogOptions | UpdatePanelOptions
+): Electron.MessageBoxOptions {
+  if (kind === 'panel') {
+    const panelOptions = options as UpdatePanelOptions
+    const buttons = panelOptions.buttons.map((b) => b.label)
+    return {
+      type: 'info',
+      title: panelOptions.title,
+      message: panelOptions.message || panelOptions.title,
+      detail: panelOptions.detail || undefined,
+      buttons,
+      defaultId: panelOptions.defaultId,
+      cancelId: panelOptions.cancelId,
+      noLink: true
+    }
+  }
+  const dialogOptions = options as DshDialogOptions
   return {
-    type: options.type ?? 'info',
-    title: options.title,
-    message: options.message,
-    detail: options.detail,
-    buttons: options.buttons && options.buttons.length ? options.buttons : ['确定'],
-    defaultId: options.defaultId,
-    cancelId: options.cancelId,
+    type: dialogOptions.type ?? 'info',
+    title: dialogOptions.title,
+    message: dialogOptions.message,
+    detail: dialogOptions.detail,
+    buttons: dialogOptions.buttons && dialogOptions.buttons.length ? dialogOptions.buttons : ['确定'],
+    defaultId: dialogOptions.defaultId,
+    cancelId: dialogOptions.cancelId,
     // 去掉旧版 Windows 弹窗底部的"在线帮助"链接
     noLink: true
   }
@@ -634,7 +749,31 @@ function toNativeOptions(options: DshDialogOptions): Electron.MessageBoxOptions 
  */
 export function showDshMessageBox(options: DshDialogOptions): Promise<DshDialogResult> {
   return new Promise<DshDialogResult>((resolve) => {
-    queue.push({ options, resolve })
+    queue.push({
+      kind: 'messagebox',
+      options,
+      resolve: (result) => resolve({ response: result.response })
+    })
+    void pump()
+  })
+}
+
+/**
+ * 展示一个版本更新面板
+ *
+ * 与 showDshMessageBox 共用同一条队列、同一份宿主脚本、同一条 IPC 通道，
+ * 因此面板与旧对话框不会同时出现（AGENTS.md §6.7 的单浮层约束）。
+ *
+ * 返回值比消息框多一个 checked：复选框（「以后自动下载并安装更新」）的勾选态。
+ * 无复选框的面板该字段恒为 false。
+ */
+export function showUpdatePanel(options: UpdatePanelOptions): Promise<UpdatePanelResult> {
+  return new Promise<UpdatePanelResult>((resolve) => {
+    queue.push({
+      kind: 'panel',
+      options,
+      resolve: (result) => resolve({ response: result.response, checked: result.checked })
+    })
     void pump()
   })
 }

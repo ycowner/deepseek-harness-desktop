@@ -34,16 +34,17 @@ export const NOTICE_BANNER_CSS = `
   border-radius: 12px;
   border: 1px solid var(--dsh-dlg-glass-border);
   background: var(--dsh-dlg-glass-strong);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: var(--dsh-dlg-blur-strong);
+  backdrop-filter: var(--dsh-dlg-blur-strong);
   box-shadow: var(--dsh-dlg-shadow);
   color: var(--dsh-dlg-body);
   font-size: 13px; line-height: 1.6;
   animation: n-slide 180ms cubic-bezier(.2, .8, .2, 1);
 }
 #dsh-notice-bar .n-item[data-level="warning"] { border-left: 3px solid var(--dsh-dlg-notice-bar); }
-#dsh-notice-bar .n-item[data-level="error"] { border-left: 3px solid #b42318; }
-#dsh-notice-bar .n-item[data-level="info"] { border-left: 3px solid var(--dsh-dlg-primary-bg); }
+/* 纯黑卡上 #b42318 会发闷，深色用更亮的 icon-error（#f87171） */
+#dsh-notice-bar .n-item[data-level="error"] { border-left: 3px solid var(--dsh-dlg-icon-error); }
+#dsh-notice-bar .n-item[data-level="info"] { border-left: 3px solid var(--dsh-accent); }
 #dsh-notice-bar .n-icon { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--dsh-dlg-muted); }
 #dsh-notice-bar .n-item[data-level="warning"] .n-icon { color: var(--dsh-dlg-icon-warning); }
 #dsh-notice-bar .n-item[data-level="error"] .n-icon { color: var(--dsh-dlg-icon-error); }
@@ -53,15 +54,15 @@ export const NOTICE_BANNER_CSS = `
 #dsh-notice-bar .n-body { margin-top: 2px; white-space: pre-wrap; color: var(--dsh-dlg-muted); }
 #dsh-notice-bar .n-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 #dsh-notice-bar .n-btn {
-  height: 28px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+  height: 28px; padding: 0 12px; border-radius: 10px; cursor: pointer;
   font-family: inherit; font-size: 12px; font-weight: 500;
-  border: 1px solid var(--dsh-dlg-glass-border);
+  border: 1px solid transparent;
   background: var(--dsh-dlg-btn-surface); color: var(--dsh-dlg-body);
 }
 #dsh-notice-bar .n-btn:hover { background: var(--dsh-dlg-btn-surface-hover); }
 #dsh-notice-bar .n-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--dsh-dlg-ring); }
 #dsh-notice-bar .n-close {
-  width: 28px; height: 28px; border: 1px solid transparent; border-radius: 8px;
+  width: 28px; height: 28px; border: 1px solid transparent; border-radius: 10px;
   background: transparent; color: var(--dsh-dlg-muted);
   font-size: 16px; line-height: 1; cursor: pointer; font-family: inherit;
 }

@@ -13,7 +13,7 @@
 | 中文名   | DSH Desktop / DeepSeek Harness Web 桌面客户端                         |
 | AppId | `com.dsh.desktop`                                                |
 | 产品名   | `DSH Desktop`                                                    |
-| 版本    | `1.0.0`                                                          |
+| 版本    | `1.0.20`                                                         |
 | 协议    | MIT                                                              |
 | 目标平台  | **仅 Windows x64**（`win: { target: nsis, arch: x64 }`）            |
 | 权限模型  | **安装器**以管理员运行（`perMachine` 装到 Program Files）；**客户端**以普通用户运行（`requestedExecutionLevel: asInvoker`，1.0.19 起） |
@@ -73,7 +73,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   │   ├── dsh-repair.ts        ← DSH 在线修复（两阶段：prepare 装进 dsh.new.<ts>/ / activate 两次 rename + 就绪后异步回收）
 │   │   ├── dsh-components.ts    ← 按需组件安装（1.0.19：libreoffice-kit 平台包 181.5 MB 改为运行时下载，见 §6.9）
 │   │   ├── dsh-version.ts       ← DSH 版本检查、semver 比较、packument integrity 查询、npm 双源并行取最大、GitHub 上游版本信息查询（仅手动检查告知）
-│   │   ├── app-update.ts        ← 客户端更新元数据检查（拉 {publish.url}/latest.yml、版本比较、清单文件名净化）+ 遗留安装包清理
+│   │   ├── app-update.ts        ← 客户端更新元数据检查（拉 {publish.url}/latest.yml、版本比较、清单文件名净化、releaseDate 解析）+ 遗留安装包清理
 │   │   ├── auto-updater.ts      ← 客户端自动下载/安装（electron-updater 单例封装、状态机、进度节流、提示后安装决策）
 │   │   ├── changelog.ts         ← 更新日志获取（上/本项目 GitHub Releases）+ 安全 markdown 渲染
 │   │   ├── injected-theme.ts    ← 注入式 UI 共享资产（--dsh-* 令牌 + ICONS + FONT_STACK）
@@ -81,6 +81,9 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │   │   ├── notice.ts            ← 公告拉取/校验/已读状态（notifications.json，见 §6.8）
 │   │   ├── notice-banner.ts     ← 公告横幅注入层（DSH 页顶部堆叠，见 §6.8）
 │   │   ├── dsh-dialog.ts        ← 自绘对话框层（Shadow DOM + 队列 + 原生兜底，见 §6.7）
+│   │   ├── update-panel.ts      ← 版本更新面板（dsh-dialog 的 `kind:'panel'` 变体：图标 + 大标题 + 日期 + 复选框 + 左右分组按钮，见 §6.7）
+│   │   ├── settings-store.ts    ← settings.json 唯一读写方（主题 + 更新偏好：自动下载开关 / 已跳过版本号）
+│   │   ├── theme-store.ts       ← 主题偏好（公开 API 不变，内部委托 settings-store）
 │   │   ├── node-binary.ts       ← 内置 Node 二进制路径解析
 │   │   └── deepseek-balance.ts  ← DeepSeek 余额查询（DSH 凭据解析 + /user/balance + 轮询订阅，见 §6.6）
 │   ├── preload/
@@ -145,7 +148,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 │  ├── 帮助菜单  ──► 标题栏按钮触发 Menu.popup：检查更新 /      │
 │  │                更新日志（DSH 运行包 / 客户端）/ 关于       │
 │  ├── 客户端更新  ──► R2 latest.yml 检测 → 点亮标题栏「更新」按钮 →   │
-│  │                用户确认后下载 251MB（DSH 页顶部显示进度横幅）    │
+│  │                更新面板确认后下载 251MB（DSH 页顶部显示进度横幅）│
 │  └── 子进程管理 ──► spawn(内置 node.exe + 缓存的 DSH 入口)   │
 │                                                             │
 │       ┌──────────────────────────────────────────┐           │
@@ -207,8 +210,8 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `get-installed-version` | renderer → main (invoke) | loading.html       | 返回已安装的 DSH 版本号                                                       |
 | `get-titlebar-update-state` | renderer → main (invoke) | titlebar.html 首帧 | 返回 `TitlebarUpdateState`（client 含 `show`/`phase`/`percent`/`version` + dsh）；仅 `event.sender === mainWindow.webContents` 放行 |
 | `titlebar-update-state` | main → renderer        | `pushTitlebarUpdateState()` | 状态变化即推送单条合并快照，驱动标题栏两个更新按钮显隐与 title 提示 |
-| `titlebar-client-update` | renderer → main (send) | titlebar.html「更新」按钮 | 按 `phase` 走四条互斥分支：`available` → [下载并更新]/[取消]；`downloading` → [取消下载]/[继续下载]（`defaultId` 与 `cancelId` 都给「继续」，误按回车不会丢掉已下的一半）；`downloaded` → [立即重启安装]/[下次启动时安装]/[取消]；`error` → [重试下载]/[浏览器下载]/[取消]。仅标题栏页可触发 |
-| `titlebar-dsh-update` | renderer → main (send) | titlebar.html「更新DSH」按钮 | 弹「vX → vY」确认框（`defaultId: 1` 默认焦点给「取消」，因为更新会停服务、装 518 个包）；确认后走 `performUpdate()`（`isUpdating` 互斥锁保护）。仅标题栏页可触发 |
+| `titlebar-client-update` | renderer → main (send) | titlebar.html「更新」按钮 | 按 `phase` 走四条互斥分支，各自弹一个**更新面板**（`kind:'panel'`）：`available` → [跳过此版本]/[稍后]/[下载更新]（带复选框「以后自动下载并安装更新」）；`downloading` → [取消下载]/[继续下载]（`defaultId` 与 `cancelId` 都给「继续」，误按回车不会丢掉已下的一半）；`downloaded` → [取消]/[下次启动时安装]/[立即重启安装]；`error` → [取消]/[浏览器下载]/[重试下载]。仅标题栏页可触发 |
+| `titlebar-dsh-update` | renderer → main (send) | titlebar.html「更新DSH」按钮 | 弹更新面板 [跳过此版本]/[稍后]/[确定更新]（`defaultId` 与 `cancelId` 都给「稍后」，因为更新会停服务、装 518 个包）；确认后走 `performUpdate()`（`isUpdating` 互斥锁保护）。仅标题栏页可触发 |
 | `open-external`   | renderer → main (invoke) | 关于模态框 GitHub 按钮 | 在系统默认浏览器打开 URL；受 `isTrustedSender` 守卫，仅允许 `http(s)` 协议              |
 | `show-help-menu`  | renderer → main (send) | 标题栏「帮助」按钮       | 校验 sender 为主窗口 webContents 后，以按钮页内坐标（窗口相对坐标，见 §12.2 第 23 条）`Menu.popup` 弹出原生菜单（检查更新 / 更新日志子菜单 / 关于）|
 | `help-menu-closed`| main → renderer        | 主进程 `menu-will-close` | 通知 titlebar.html 复位「帮助」按钮的 hover/active 类，防止原生菜单弹出期间鼠标事件被屏蔽导致的交互态颜色残留（见 §12.1 第 24 条）|
@@ -217,7 +220,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `refresh-balance` | renderer → main (send) | titlebar.html 徽章点击 / 托盘「刷新余额」 | 触发一次余额查询（`refreshBalance('manual' \| 'tray')`）；结果经 `balance-update` 推送。受 `isTrustedSender` 守卫 |
 | `balance-update`  | main → renderer        | 主进程 `onBalanceUpdate` 订阅回调 | 每次查询完成后推送最新快照，驱动标题栏徽章渲染与托盘菜单重建 |
 | `balance-tooltip` | renderer → main (send) | titlebar.html 徽章悬停/离开 | 参数 `(open, html?)`：主进程将 tooltip 面板（内容 HTML 由标题栏页构建）注入 DSH 内容页 `#dsb-tooltip` 展示/关闭。受 `isTrustedSender` 守卫 |
-| `dsh-dialog-response` | renderer → main (send) | 内容页内自绘对话框的按钮 | 参数 `(id, index)`：用户点选后回传按钮下标。守卫比 `isTrustedSender` 更严——直接比对 `event.sender === dshView.webContents`（只有被注入宿主的那个页面能回传），且 `id` 与当前活动对话框不符的过期点击一律丢弃。详见 §6.7 |
+| `dsh-dialog-response` | renderer → main (send) | 内容页内自绘对话框 / 更新面板的按钮 | 参数 `(id, index, payload?)`：用户点选后回传按钮下标；更新面板额外带 `payload.checked`（复选框勾选态，页内是第三方内容，按不可信输入校验）。守卫比 `isTrustedSender` 更严——直接比对 `event.sender === dshView.webContents`（只有被注入宿主的那个页面能回传），且 `id` 与当前活动浮层不符的过期点击一律丢弃、`index` 必须落在当前按钮数组范围内。详见 §6.7 |
 | `notice-read` | renderer → main (send) | 公告横幅的「× 关闭」 | 参数 `id`：回传已读。`markNoticeRead` 内部按 `^[A-Za-z0-9._-]{1,64}$` 校验，非法值只记日志不落盘。见 §6.8 |
 | `get-notice-state` | renderer → main (invoke) | titlebar.html 铃铛首帧 | 返回 `{ unread, hasBanner }`，避免早于/晚于推送导致红点状态错位。仅主窗口 webContents 可调 |
 | `notice-refresh` | renderer → main (send) | titlebar.html 铃铛点击 | 立即拉一次公告并展示。任何环境都执行（含开发期），是验证公告 UI 的主要入口。见 §6.8 |
@@ -228,7 +231,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 `show-help-menu` 与三条标题栏更新通道（`get-titlebar-update-state` / `titlebar-client-update` / `titlebar-dsh-update`）则直接比对 `event.sender === mainWindow.webContents`（更严格：只有标题栏页面能触发）。
 
 **帮助菜单结构**（标题栏「帮助」按钮 → 原生菜单）：
-- 检查更新... → 弹 dialog 选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）。手动检查 DSH 时 `fetchLatestVersion` 并行查 npmmirror 与 npmjs 的 dist-tags 取版本最大者，并附加查询上游 GitHub Releases（`dsh-v*` tag）：若 GitHub 有新版而 npm 未发布，对话框附加「尚未发布到 npm」告知；自动检查/轮询只认 npm 可安装版本
+- 检查更新... → 弹更新面板选择检查项（DSH 运行包 / 客户端 / 全部，原 show-update-menu 逻辑迁移至此）。手动检查 DSH 时 `fetchLatestVersion` 并行查 npmmirror 与 npmjs 的 dist-tags 取版本最大者，并附加查询上游 GitHub Releases（`dsh-v*` tag）：若 GitHub 有新版而 npm 未发布，面板附加「尚未发布到 npm」告知；自动检查/轮询只认 npm 可安装版本
 - 更新日志 → 子菜单：DSH 运行包日志（上游 `deepseek-ai/deepseek-harness` Releases，tag 前缀 `dsh-v`）/ DSH Desktop 客户端日志（本项目 Releases，tag 前缀 `v`）
 - 关于 DSH Desktop → 模态框（客户端版本号 + DSH 运行包版本号 + 内置 Node 运行时（版本 + ABI，走 `getBundledRuntimeInfo()`，查询失败时整行不渲染）+ GitHub 仓库链接按钮）
 
@@ -258,7 +261,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | `refreshBalance()` | `void`                                   | 触发一次余额刷新（徽章点击；结果经 `onBalanceUpdate` 推送）|
 | `onBalanceUpdate(cb)` | `void`                                | 订阅余额更新推送（启动 / 聚焦 / 5 分钟轮询 / 手动刷新均会推送）|
 | `setBalanceTooltip(open, html?)` | `void`                        | 通知主进程余额明细 tooltip 开合；展开时附内容 HTML（标题栏页构建），主进程将其注入 DSH 内容页展示|
-| `dialogResult(id, index)` | `void`                              | 自绘对话框的按钮回传（`id` 供主进程丢弃过期点击，`index` 为按钮下标）。由 dsh-dialog 注入内容页的 Shadow DOM 脚本调用，详见 §6.7 |
+| `dialogResult(id, index, payload?)` | `void`                              | 自绘对话框 / 更新面板的按钮回传（`id` 供主进程丢弃过期点击，`index` 为按钮下标）。更新面板额外传 `payload = { checked }` 回传复选框勾选态。由 dsh-dialog 注入内容页的 Shadow DOM 脚本调用，详见 §6.7 |
 | `noticeRead(id)` | `void`                                    | 公告横幅「× 关闭」回传已读。由 notice-banner 注入内容页的 Shadow DOM 脚本调用，见 §6.8 |
 | `getNoticeState()` | `Promise<{unread, hasBanner}>`           | 读取公告摘要（铃铛首帧用） |
 | `onNoticeState(cb)` | `void`                                   | 订阅公告摘要推送（未读数变化时驱动红点） |
@@ -314,8 +317,12 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 | ----- | ----------------------------------------------------------------------------------------------------- |
 | 更新源   | Cloudflare R2，经自持域名 `https://download.dsh.392700.xyz` 分发（`electron-builder.yml` 的 `publish` 段）      |
 | 检测方式  | `src/main/app-update.ts` 拉 `GET {publish.url}/latest.yml`（`fetchLatestUpdateInfo` → `checkForAppUpdate`）      |
-| 更新方式  | **按需下载 + 可见进度**：检测到新版本只点亮标题栏「更新」按钮，**不自动下载**。用户点按钮 → 确认框 [下载并更新]/[取消] → 才开始下载 251MB，期间 DSH 页顶部显示进度横幅（百分比 + 已下载量 + 速度），标题栏按钮同步呈「下载中 N%」进度态、点击可取消。**下完自动弹** [立即重启安装]/[下次启动时安装]/[取消]（同一版本只自动弹一次，错过可点标题栏「更新」按钮补弹）；失败时按钮仍在，点开是 [重试下载]/[浏览器下载]/[取消] |
-| 展示位置  | 状态提示在标题栏 `titlebar.html` 的 `.tb-actions` flex 容器（余额徽章右侧）；**下载进度**在 DSH 页顶部横幅（`#dsh-ub`，纯展示零 IPC 面，取消入口只在标题栏按钮上）。二者由 `pushTitlebarUpdateState()` + `syncAppUpdateBanner()` 分别投影，同一次状态变化里成对更新 |
+| 更新方式  | **按需下载 + 可见进度**：检测到新版本只点亮标题栏「更新」按钮，**不自动下载**。用户点按钮 → 更新面板 [跳过此版本]/[稍后]/[下载更新] → 才开始下载 251MB，期间 DSH 页顶部显示进度横幅（百分比 + 已下载量 + 速度），标题栏按钮同步呈「下载中 N%」进度态、点击可取消。**下完自动弹** 更新面板 [取消]/[下次启动时安装]/[立即重启安装]（同一版本只自动弹一次，错过可点标题栏「更新」按钮补弹）；失败时按钮仍在，点开是 [取消]/[浏览器下载]/[重试下载]。所有弹窗都是 `dsh-dialog` 的 `kind:'panel'` 变体（见 §6.7） |
+| 发布日期  | `latest.yml` 顶层 `releaseDate`（ISO-8601）由 `app-update.ts` 的 `parseLatestYml()` 解析，随 `AppUpdateInfo.releaseDate` 传出，供更新面板的日期行渲染。**取不到就整行不渲染，绝不编造日期**；DSH 运行包没有便宜的发布日期来源，同样整行不渲染 |
+| 自动更新  | **opt-in**：更新面板上的复选框「以后自动下载并安装更新」（默认**不勾**）。勾选后写入 `settings.json` 的 `update.autoUpdate`，此后**检测到的新客户端版本自动下载**、下载完成**不弹面板**、直接 `deferInstallToNextLaunch()`（下次启动时静默安装）。手动「检查更新…」路径**始终弹面板、绝不自动下载**。**不改动 electron-updater 的 `autoDownload` / `autoInstallOnAppQuit`**（见下方两条约束） |
+| 跳过版本  | 「跳过此版本」写入 `settings.json` 的 `update.skippedClientVersions` / `update.skippedDshVersions`（各记各的，上限 20 条）。命中被跳过的版本时自动路径**不点亮按钮、不下载**；出现更高版本自动恢复正常提示。**手动检查始终如实展示最新版本**，跳过列表不影响它 |
+| 轮询    | 客户端与 DSH 运行包各有 **6 小时**一次定时轮询（`startPeriodicAppUpdateCheck` / `startPeriodicDshUpdateCheck`，仅打包环境生效）。没有客户端轮询，「以后自动下载」对运行期间才发布的新版本就是空话 |
+| 展示位置  | 状态提示在标题栏 `titlebar.html` 的 `.tb-actions` flex 容器（余额徽章右侧）；**下载进度**在 DSH 页顶部横幅（`#dsh-ub`，纯展示零 IPC 面，取消入口只在标题栏按钮上）。二者由 `pushTitlebarUpdateState()` + `syncAppUpdateBanner()` 分别投影，同一次状态变化里成对更新。横幅底色走 `--dsh-modal-bg`：浅色 `#ffffff` / **深色 `#000000`（纯黑贴顶通栏）**，底部发丝线走 `--dsh-modal-border` |
 | 降级语义  | **标题栏按钮是进度的权威载体，横幅只是可降级副本**。两者走不同通道——按钮走 `mainWindow.webContents.send()`（无任何 guard），横幅走 `dshView.webContents.executeJavaScript()`（有准入判定 + 异常路径）。因此横幅挂掉时进度不丢，连续 3 次注入失败即 `console.error` 醒目降级并停止空打 CDP，本次下载的进度改由标题栏独占承载 |
 | 守卫    | 版本号经 `isValidVersion` 校验；清单文件名做路径分隔符净化（禁协议前缀与 `/`、`\`）；三条标题栏更新 IPC 均比对 `event.sender === mainWindow.webContents` |
 | 遗留清理  | `cleanupLegacyInstallers()` 启动时一次性清理历史版本下载到安装目录的安装包                                                      |
@@ -328,6 +335,7 @@ DSH 包本体（`@deepseek-ai/dsh`）不在本仓库源码中，而是由构建�
 
 - **`autoDownload = false`**：刻意关掉 electron-updater 自带的「一发现就自动下」。它的触发时机是 `checkForUpdates()` 成功那一刻，而我们的检测走 `app-update.ts` 拉 `latest.yml`（有完整的错误处理与三态返回），两条链路要各跑一次才能对齐。现在由 `index.ts` 在**用户点了「下载并更新」之后**才显式调 `downloadAppUpdate()`，符合「不点不下载」的交互约定。
 - **`autoInstallOnAppQuit = false`**：electron-updater v6 该字段**默认为 `true`**，且 `BaseUpdater.executeDownload` 在下载完成的回调里就注册 `app.on('quit')` 处理器。保持默认 `true` 会导致用户点了「稍后」也在下次退出时被静默安装，违背「提示后安装」的交互约定。
+- **「以后自动下载并安装更新」走自建链路，不碰上面两个刻意默认**：勾选复选框 → `settings.json` 的 `update.autoUpdate = true` → 检测链路（启动 + 6 小时轮询）命中新版本时直接调既有的 `downloadAppUpdate()` → 下载完成后调既有的 `deferInstallToNextLaunch()` → 下次退出时由既有的 `confirmAndQuit()` → `quitAndInstallAppUpdate(true)` 静默安装。**全程不弹面板**，也不会在会话中间突然重启应用。手动「检查更新…」路径**始终弹面板**、不自动下载。
 - **重开应用不会白下第二遍**：`DownloadedUpdateHelper.validateDownloadedPath` 在真正下载前会核对缓存目录（`%LOCALAPPDATA%\dsh web desktop-updater\pending\`，目录名取自 `app-update.yml` 的 `updaterCacheDirName`）里的 `update-info.json` 与安装包 sha512，命中就完全跳过下载、直接派发 `update-downloaded`。这条缓存路径同时覆盖两种场景：静默期遗留的半成品，以及用户「下次启动时安装」后没装成。**不要绕过它自己另存一份「已下载」状态**。
 - **取消下载必须显式持有 `CancellationToken`**：`AppUpdater.downloadUpdate(token)` 接受外部 token 并透传到 `electronHttpExecutor`（其 `createPromise` 在 cancel 时 reject `CancellationError`），且 `doDownloadUpdate` 的 catch 会先 `removeFileIfAny()` 删掉半截文件。不传 token 就只能等它自己下完。
 - **判断「被取消」用标志位，不要用 `instanceof CancellationError`**：本项目 `builder-util-runtime` 有两份副本——运行时（electron-updater）9.7.0、构建工具链（electron-builder）9.2.10，是不同的类对象，跨副本 `instanceof` 恒为 false（`tsc` 会在这一步直接报 TS2345）。已把 `package.json` 依赖声明成 `^9.7.0` 让运行时收敛成一份，但只要依赖解析再分叉就会静默失效——把用户主动取消误判成下载失败并弹「重试下载」。统一用 `cancelRequested` 标志位。
@@ -366,22 +374,41 @@ GitHub Release 仍需保留（更新日志入口 + 人工兜底下载），每�
 
 替换系统 `dialog.showMessageBox` / `showErrorBox` 的自绘对话框。**19 处调用点已全部迁移**（原 18 个 `showMessageBox` + 1 个 `showErrorBox`），`index.ts` 里已不再直接引用 `dialog`；系统弹窗仅作为对话框层内部的兜底路径存在。
 
+> 迁移后的分工：**更新类提示全部走更新面板**（`showUpdatePanel()`，见下方「版本更新面板」小节）；**非更新类**（退出确认 / 公告三处 / 组件状态）继续走 460px 旧卡片 `showDshMessageBox()`。两者共用同一条队列、同一段宿主脚本、同一条 IPC 通道，因此不会同时出现。
+
 | 项     | 说明                                                                                                    |
 | ----- | ----------------------------------------------------------------------------------------------------- |
 | 为什么自绘 | `dialog.showMessageBox` 是**系统原生窗口**，`MessageBoxOptions` 只暴露 `type`/`message`/`detail`/`buttons`/`defaultId`/`cancelId`/`noLink` 等语义参数，**没有任何颜色/字体/圆角/按钮形态钩子**。不做自绘就没有"现代化"这条路。原生弹窗也没有可套用的组件库（它们作用在 DOM 上，碰不到系统窗口） |
 | 承载位置 | 注入 `dshView`（`did-finish-load` 调 `ensureDialogHost`）。dshView 叠在主 webContents **之上**，标题栏页的 DOM 在被覆盖区域永远不可见，因此全屏遮罩只能活在 dshView 内。**此钩子刻意不加 `isDshPageLoaded` 守卫**：退出确认最常发生在 error 页（DSH 起不来时用户点关闭），loading/error/DSH 三种页面都要能弹 |
 | 样式隔离 | 挂在 **Shadow DOM**（`attachShadow`）里，样式与宿主页面（DSH 自己的 UI，可能带 Tailwind 预处理）完全隔离，不受其全局 reset / 基础样式影响。`:host { all: initial }` 挡页面侧的通用选择器 |
-| 视觉   | **磨砂玻璃卡片 + 大圆角**：卡片 24px，遮罩另叠 `blur(6px)` 让整屏背景先"化开"，半透明卡片才有东西可折射（两层 blur 是刻意叠加，不是重复）。`--dsh-dlg-*` 令牌是唯一色源 |
-| 文字层级 | 三段各一风格、**每级各带一个内联 SVG 图标**（无 emoji）：① `message` 13.5px 正文色 + 中性横杠 `bullet`；② `detailTone: 'notice'` 风险/错误类 —— 3px 琥珀竖条 + 淡琥珀底 + 警示三角 + 13px 正文色；③ `detail` 缺省即 `'meta'` 版本信息类 —— 淡中性底 + tag 标签 + 12.5px 次级色。19 处调用点：7 处显式 `notice`、9 处 `meta`、3 处无 detail |
-| 按钮尺寸 | `lead`（主，13px / 34px / `min-width: 112px` 填色）、`minor`（次级，12px / 30px 描边）、`ghost`（取消，12px 纯文字）。**`lead` 的 `min-width` 不是凑数**：4 汉字的「全部检查」按内容排版会比 5 汉字+拉丁的「检查DSH运行包」更窄，不撑开就谈不上"主按钮最大" |
+| 视觉   | **浅色磨砂玻璃 / 深色 #202020 实心**：卡片 16px 圆角；浅色下遮罩另叠 `blur(6px)` 让整屏背景先"化开"，半透明卡片才有东西可折射（两层 blur 是刻意叠加，不是重复）；深色下卡片底色 `#202020` 不透明、卡片级模糊由 `--dsh-dlg-blur: none` 关闭、去内高光，只留一圈 `rgba(255,255,255,.08)` 极淡描边保证边界可辨。遮罩层模糊两套都保留。`--dsh-dlg-*` 令牌是唯一色源 |
+| 文字层级 | 三段各一风格、**每级各带一个内联 SVG 图标**（无 emoji）：① `message` 13.5px 正文色 + 中性横杠 `bullet`；② `detailTone: 'notice'` 风险/错误类 —— 3px 琥珀竖条 + 淡琥珀底 + 警示三角 + 13px 正文色；③ `detail` 缺省即 `'meta'` 版本信息类 —— 淡中性底 + tag 标签 + 12.5px 次级色。旧卡片保留的调用点为退出确认 / 公告三处 / 组件状态；更新类提示已迁到更新面板 |
+| 按钮尺寸 | **三档同高同圆角、全部实底**（对齐参考图）：`.btn` 基础为 13px / 34px / `border-radius: 10px` / `padding: 0 18px` / `border: 1px solid transparent`（透明描边只为防 hover 尺寸跳动）；`lead`（主，`min-width: 112px`，`--dsh-dlg-primary-*` 填充）、`minor` 与 `ghost`（次级/取消，`--dsh-dlg-btn-surface` 实底、`--dsh-dlg-btn-surface-hover` hover）。**深色主按钮白底深字（`#ffffff` / `#0b1220`），浅色主按钮反转为近黑底白字（`#111827` / `#ffffff`）**；次级与取消两套主题都是浅灰实底，不再有纯文字按钮。**`lead` 的 `min-width` 不是凑数**：4 汉字的「全部检查」按内容排版会比 5 汉字+拉丁的「检查DSH运行包」更窄，不撑开就谈不上"主按钮最大" |
 | 按钮排布 | `.foot` 默认 `flex-wrap: wrap`；**按钮数 ≥ 4 时 `buildDialogSpec` 置 `tight: true`**，切 `flex-wrap: nowrap` + 8px 间距作为硬保护（宁可横向压缩也不退回两行按钮） |
-| 预览   | `node scripts/preview-dialog.js` → `docs/dialog-preview.html`。**两层都被覆盖**：对话框侧 spec 走真实的 `buildDialogSpec()`（生成时跑 `assertDerivation()`），模态框侧注入代码由真实的 `buildModalHostScript()` / `buildModalUpdateScript()` 生成（生成时跑 `assertModalStructure()`）。任一自检不过直接抛错、中止生成。深链：`#sample` / `#meta` / `#failed` / `#picker` / `#quit` / `#modal-about` / `#modal-changelog`，任意形态加 `-dark` 后缀切深色 |
+| 预览   | `node scripts/preview-dialog.js` → `docs/dialog-preview.html`。**两层都被覆盖**：对话框侧 spec 走真实的 `buildDialogSpec()`（生成时跑 `assertDerivation()`），模态框侧注入代码由真实的 `buildModalHostScript()` / `buildModalUpdateScript()` 生成（生成时跑 `assertModalStructure()`）。另有 `assertReferenceStyling()` 守着跨文件的参考图规格（卡片 16px / 按钮 34px+10px 三档实底 / 深色 #202020+模糊令牌置 none / 主按钮反色），任一条不过直接抛错、中止生成。深链：`#sample` / `#meta` / `#failed` / `#picker` / `#quit` / `#modal-about` / `#modal-changelog` / `#panel` / `#panel-dark` / `#panel-runtime` / `#panel-phases` / `#panel-picker`，任意形态加 `-dark` 后缀切深色 |
 | 交互 | Esc → `cancelId`；回车 → `defaultId`（初始焦点）；点遮罩 → `cancelId`；Tab 在按钮间闭环（模态必须锁焦点）；`role="dialog"` + `aria-modal`；动画 140/160ms 且尊重 `prefers-reduced-motion` |
 | 队列   | 同一时刻只显示一个，多余请求 FIFO 排队（原生弹窗是系统层叠放，用队列复刻"逐个确认"，避免两个遮罩互相踩） |
 | 兜底   | `dshView` 不可用 / 页面导航中 / 注入失败 → 回落 `dialog.showMessageBox`，返回值形状与语义完全一致。导航打断时按 `cancelId` 主动收敛并丢弃积压队列——否则注入节点随文档销毁，等待中的 Promise 会永久挂起 |
 | 先后顺序 | `loadErrorPage()` 是 fire-and-forget，要实现「先切错误页、再弹对话框」必须 `loadErrorPage(...)` 后紧跟 `await waitForNextDialogHost()` 把两步串起来。反过来（先弹后导航）注入节点会随文档销毁，弹窗被当「被中断」收敛，用户根本看不到。`waitForNextDialogHost` 内部会**立刻**作废上一页的 `hostReady`——导航事件 `did-start-loading` 是异步派发的，晚于当前调用栈 |
 | 守卫   | `dsh-dialog-response` 直接比对 `event.sender === dshView.webContents`，且 `id` 与当前活动对话框不符的过期点击一律丢弃 |
 | 按钮排布 | `.foot` 是 `flex-wrap: wrap`，`.btn` 为 `flex: none` + `white-space: nowrap`。中英混排文案（如「检查 DSH Desktop 客户端」）估算单行放不下时**整体换行**，而不是把单个按钮挤成两行 |
+| 更新面板 | 见下方「版本更新面板」小节 |
+
+#### 版本更新面板（`src/main/update-panel.ts`，`dsh-dialog` 的 `kind:'panel'` 变体）
+
+所有**版本更新类**提示（客户端新版本 / DSH 运行包新版本 / 下载中 / 已完成 / 失败 / 手动「检查更新…」全套）都已从 460px 文字卡迁到 480px 的大面板，形态对齐用户提供的参考图：应用图标 + 大标题（版本号内联着色）+ 日历日期行 + 复选框 + 底部左右分组按钮。
+
+| 项     | 说明 |
+| ----- | ---- |
+| 为什么是「变体」而不是第三个注入层 | `dsh-dialog.ts` 已独占三件极关键的事：① 单一队列保证任意时刻只有一个浮层；② `dsh-dialog-response` 的发送方守卫（`event.sender === dshView.webContents`，比 `isTrustedSender` 更严）；③ 导航打断收敛（`did-start-loading` 按 `cancelId` 主动 resolve，否则等待中的 Promise 永久挂起）。另起一层等于把这三件事复制一遍，还会出现「两个浮层各有一个队列」的竞态 |
+| 模块边界 | 面板专属的 CSS / spec 类型 / 纯函数构造器在 `update-panel.ts`（**刻意不 import electron**，这样 `scripts/preview-dialog.js` 能在沙箱里加载它驱动真实推导）；队列 / 宿主脚本 / IPC 通道全在 `dsh-dialog.ts`。依赖方向单一：`dsh-dialog.ts → update-panel.ts → injected-theme.ts` |
+| 形态 | 卡片 `width: min(480px, 100%)`、圆角 16px，只复用 `--dsh-dlg-*` 令牌、**不在本地覆写令牌值**（浅色玻璃 / 深色 #202020 由令牌决定，见 §12.1 第 40 条）。头部：56×56 应用图标（`getAppIconDataUrl(64)`，data URL）+ 20px/600 标题 + 内联着色版本号；日期行 13px muted + `calendar` 图标，缩进到与标题左对齐；正文 13.5px；提示块沿用 `.detail--notice` / `.detail--meta`；复选框 20px 自绘方框 + 15px 链接色标签（勾选态随 `--dsh-dlg-primary-*` 变成「深色白底黑勾 / 浅色黑底白勾」） |
+| 图标兜底 | 图标走 data URL，DSH 页面 CSP 若拦下 `img-src` 会留一个空坑。`<img>` 挂 `error` 监听，失败即隐藏图标位，标题左移、布局不塌 |
+| 按钮分组 | 底部 `.pfoot` 是 `justify-content: space-between` 的左右两组：左「跳过此版本 / 取消」，右「稍后 + 主按钮」。右组允许整体换行（**不启用旧卡的 `tight` 禁换行模式**）——宁可换行也不压缩按钮文字。**例外是「检查更新」四按钮面板**：480px 装不下四个按钮，右组换行会让「全部检查」孤立换行、与其它按钮错位。该面板用 `UpdatePanelButton.block: true` 把三个检查项放进底栏上方的 `.pfoot-block` 独立行（`space-between` 让三枚按钮间距均分整行），底栏只留右侧「取消」。数组顺序仍按回传下标排列（`index.ts` 的 response 分支依赖它），视觉位置由 `block` / `align` 决定 |
+| 键盘语义 | 面板的 `defaultId` / `cancelId` **必填**，且**每个预设都是一组产品决策**，集中在 `update-panel.ts` 的 `PANEL_*` 预设里，调用点只引用不重写：客户端「发现新版本」defaultId=「下载更新」、cancelId=「稍后」；「下载中」两者**都**指向「继续下载」（误按回车不能丢掉已下的 251MB）；「已下载完成」defaultId=「立即重启安装」、cancelId=「取消」；运行包更新两者**都**指向「稍后」（回车不得直接触发一次打断会话的更新）；手动四按钮 defaultId=「全部检查」、cancelId=「取消」 |
+| 复选框 | **只出现在客户端「发现新版本」面板**（DSH 运行包全程手动确认，不显示）。勾选态是**偏好**：面板无论点哪个按钮关闭都写回 `settings.json` 的 `update.autoUpdate`，但只对**此后**检测到的版本生效 |
+| 日期 | 客户端取 `latest.yml` 的 `releaseDate`（见 §6.5）；**取不到就整行不渲染**，不编造日期、不加额外网络请求。DSH 运行包没有便宜的日期来源，同样整行不渲染 |
+| 预览 | `node scripts/preview-dialog.js` 跑 `assertUpdatePanelSpec()`（断言跑在**真实的 `buildUpdatePanelSpec()`** 上）与 `assertUpdatePanelStructure()`（宿主分流 / append 层级 / 勾选态回传 / 图标兜底 / 初始焦点 / 样式骨架）。深链：`#panel` / `#panel-dark` / `#panel-runtime` / `#panel-phases` / `#panel-picker` |
 
 **迁移时最容易丢的三件事**：
 
@@ -394,7 +421,8 @@ GitHub Release 仍需保留（更新日志入口 + 人工兜底下载），每�
 | | 对话框（`dsh-dialog`） | 模态框（`injected-modal`） |
 |---|---|---|
 | 卡片 | 460px 小卡 | 720px 大卡，`max-height: 80vh` |
-| 玻璃 | `blur(20px)` / 0.72 | `blur(12px)` / 0.82（**有意降一档**：面积大 + 装长文档，两层大面积模糊叠加时弱显卡开销明显；降档后 muted 对比度反而从 4.78:1 升到 5.7:1） |
+| 玻璃 | 浅色 `blur(20px)` / 0.72，深色不透明 #202020 + `--dsh-dlg-blur: none` | 浅色 `blur(12px)` / 0.82，深色不透明 #202020 + `--dsh-dlg-blur-strong: none`（**有意降一档**：面积大 + 装长文档，两层大面积模糊叠加时弱显卡开销明显；降档后 muted 对比度反而从 4.78:1 升到 5.7:1。深色两者都关闭卡片级模糊，遮罩层模糊保留） |
+| 圆角 | 16px 卡片 / 10px 按钮 | 16px 卡片 / 10px 关闭按钮 |
 | 头部 | 类型图标 + 标题 | 类型图标（`info` / `doc`）+ 标题 + × |
 | 正文 | 三段文字层级 | 可滚动 markdown（`h3/h4/h5` / 列表 / 行内代码 / 代码块 / 链接） |
 
@@ -409,7 +437,7 @@ Shadow DOM 迁移的代价：**外部选择器全部失效**，唯一入口是 `
 
 `updateModalBody` 的 `catch` 保留了 `warn` 日志（不要改回空 catch）：它静默失败的表现是"更新日志一直转圈"，没有日志就只能靠猜。
 
-余额 tooltip（`BALANCE_TOOLTIP_CSS`）也已玻璃化，`blur(14px)` + 16px 圆角（比卡片小，配 264px 宽面板）。它的 11–12px 小字是全应用对比度最紧的一处；`injectBalanceTooltipShell` 补了一次幂等的令牌写入，避免首次悬停早于 `syncInjectedTheme` 时令牌缺失。
+余额 tooltip（`BALANCE_TOOLTIP_CSS`）沿用同一套令牌：浅色磨砂玻璃（`blur(14px)`）/ 深色不透明 #202020，16px 圆角（比卡片小，配 264px 宽面板）。它的 11–12px 小字是全应用对比度最紧的一处；`injectBalanceTooltipShell` 补了一次幂等的令牌写入，避免首次悬停早于 `syncInjectedTheme` 时令牌缺失。
 
 ### 6.8 公告（`src/main/notice.ts` + `notice-banner.ts`）
 
@@ -419,7 +447,7 @@ Shadow DOM 迁移的代价：**外部选择器全部失效**，唯一入口是 `
 | ----- | ----------------------------------------------------------------------------------------------------- |
 | 分层   | 数据侧 `notice.ts`（拉取/校验/已读/展示决策）／渲染侧 `notice-banner.ts`（横幅注入）／编排侧 `index.ts`（何时拉、投影到哪、何时弹） |
 | 展示决策 | `planNotices()` 是**纯函数**（不碰网络与 DOM）：生效窗口过滤 → 未读过滤 → 按 error→warning→info 排序 → 横幅截断 3 条 → 模态全收。可在预览/自检里直接断言 |
-| 形态   | `banner` 贴 DSH 页顶部堆叠（Shadow DOM，`[data-dsh-notice]`）；`modal` 走 `showDshMessageBox`，**延迟 10 秒**在 DSH 页就绪后弹（用户刚开应用通常正要干活，立刻拦体感差） |
+| 形态   | `banner` 贴 DSH 页顶部堆叠（Shadow DOM，`[data-dsh-notice]`）；`modal` 走 `showDshMessageBox`，**延迟 10 秒**在 DSH 页就绪后弹（用户刚开应用通常正要干活，立刻拦体感差）。横幅卡片 12px 圆角，浅色磨砂玻璃 / **深色不透明 #202020 + 0.08 极淡描边**（`--dsh-dlg-glass-strong` / `--dsh-dlg-blur-strong` 令牌）；左侧色条 `info` 走 `--dsh-accent`、`error` 走 `--dsh-dlg-icon-error`（深色下是 `#f87171`，深色底上才看得清），不使用主按钮令牌 |
 | 与更新横幅错开 | 两条横幅都贴顶。公告横幅的 `top` 运行时读 `#dsh-ub` 的 `offsetHeight`（可见时用其高度，否则 0）。两套注入**不共享状态**，靠读对方实际布局避让 |
 | 已读   | `%APPDATA%\dsh-web-desktop\notice-read.json`，形状 `{ read: { id: ISO 时间 } }`，上限 200 条按时间升序淘汰。读写策略照抄 `theme-store.ts`：读失败当空、写失败只记日志 |
 | 拉取时机 | 启动（DSH 就绪后，不阻塞）／每 6 小时／点标题栏铃铛。**仅打包环境执行**，但 `manual`（点铃铛）任何环境都跑——开发期据此验证 UI |
@@ -673,6 +701,11 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 | 打包后应用启动报 node.exe 找不到              | 确认 `electron-builder.yml` 的 `extraResources.node` filter 没误排除 `node.exe`                          |
 | 关闭应用后 DSH 进程残留                     | 检查 `stopDsh()` 在 `window-all-closed` 路径有被调用；Windows 上必须走 `taskkill /f /t`                         |
 | `dist-exe/` 体积异常大                  | 检查 `extraResources` filter 中的 `!**/node_modules/**` 是否被误删；DSH 包 `dsh-bundled` 不能进 `node_modules/` |
+| 更新面板不出现 / 点了没反应              | ① 面板走 `dsh-dialog` 的同一条队列，被别的弹窗排队阻塞时先看队列；② `did-start-loading` 会按 `cancelId` 主动收敛（导航打断），这是设计不是卡死；③ 面板要注入进 `dshView`，DSH 页面没加载完时点标题栏按钮无效 |
+| 更新面板的图标位置是空的                 | 图标是 data URL，DSH 页面 CSP 若拦 `img-src` 会触发 `<img>` 的 error 兜底（隐藏图标位）。这是预期降级；若要排查 CSP，看 DSH 页自身的响应头 |
+| 勾了「以后自动下载」却不自动下载         | ① 该开关存 `settings.json` 的 `update.autoUpdate`，**只在打包环境生效**（开发环境 `checkForAppUpdateAndPrompt` 直接 return）；② 勾选只对**此后**检测到的版本生效，手动「检查更新…」路径永远弹面板 |
+| 跳过某版本后更新按钮又亮了               | 检查 `settings.json` 的 `update.skippedClientVersions` / `update.skippedDshVersions` 是否真写进去了；命中跳过列表时自动路径**不点亮标题栏按钮**（`clearUpdateAvailable()` 会把阶段退回 idle）。出现更高版本自动恢复正常提示 |
+| 下载完成了却没有弹安装面板               | ① `onClientUpdatePhaseChange` 的跃迁检测要求「非 downloaded → downloaded」；同一版本本轮只弹一次；② 勾了自动更新时**本来就不弹**（直接 `deferInstallToNextLaunch()`），这是设计 |
 
 主进程日志前缀：`[DSH]`、`[DSH stdout]`、`[DSH stderr]`、`[DSH Repair]`，开发模式下都在终端直接可见。
 
@@ -776,7 +809,7 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
     - 历史方案「展开期间主进程 `dshView.setVisible(false)`、关闭后恢复」已废弃：隐藏后露出主 webContents 48px 以下无背景区域 → 内容区整片黑屏，实测不可接受（用户视效反馈）。
     - 现行方案：标题栏页只构建 tooltip 内容 HTML（`buildTooltip`，本地数字与固定文案无远端文本），经 `balance-tooltip` IPC（`(open, html)`）发主进程；主进程 `showBalanceTooltip` 把面板注入 DSH 页（`#dsb-tooltip`：`position:fixed; top:56px; left:242px; z-index:2147483646; pointer-events:none`）。`left` 与 titlebar.html 的 `.bb-wrap` 硬编码同源（徽章位置），调徽章位置两处必须同步。
     - `did-finish-load`（内容视图每次文档加载完成）预注入外壳保证首次悬停零延迟；`showBalanceTooltip` 内也有外壳缺失补建兜底（SPA 路由替换 body 的极端场景）。
-    - 面板主题走 `prefers-color-scheme` 媒体查询（DSH 页已由 `applyEmulateMedia` 按生效主题模拟），无需单独同步变量；CSS 选择器全部加 `#dsb-tooltip` 前缀，防与 DSH 页自身样式（`.k`/`.v` 等通用类名）碰撞。
+    - 面板主题走 `prefers-color-scheme` 媒体查询（DSH 页已由 `applyEmulateMedia` 按生效主题模拟），无需单独同步变量；CSS 选择器全部加 `#dsb-tooltip` 前缀，防与 DSH 页自身样式（`.k`/`.v` 等通用类名）碰撞。配色与其他浮层同源：浅色磨砂玻璃（`--dsh-dlg-blur-tooltip`）/ **深色不透明 #202020 + `--dsh-dlg-blur-tooltip: none`**，16px 圆角。
     - 关闭策略为「离开徽章即关」（与原生 tooltip 一致，用户确认方案①）：面板在 DSH 页（独立 webContents），鼠标无法从徽章移入面板。若未来要做「可移入面板」，需增加跨 webContents 悬停 IPC 协议。
     - 不要再把 titlebar.html 的 `html, body` 改回 `overflow: visible`：tooltip 已不在本页下探，48px 内内容不会溢出。
     - 徽章金额不要走 `fmtCNY`（自带 ¥ 前缀）：徽章的 ¥ 由独立符号位 `.bb-symbol` 提供（窄窗口 ≤540px 可单独隐藏），格式化必须走 `fmtNum`（无前缀），否则叠加成双 ¥（实测踩坑）。
@@ -812,15 +845,15 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 37. **不要试图给 `dialog.showMessageBox` 做样式**。它是系统原生窗口，`MessageBoxOptions` 只有 `type`/`message`/`detail`/`buttons`/`defaultId`/`cancelId`/`noLink` 这几个语义参数，没有颜色/字体/圆角/按钮形态钩子——这不是"难做"，是接口层面不存在。同理也没有能改它的组件库（组件库作用在 DOM 上，碰不到系统窗口）。要做现代化只有自绘一条路，见 §6.7。
 38. **不要把 `defaultId` 当成"主按钮"**。它是初始焦点与回车触发的按钮，现有代码有四处刻意把它给「取消 / 继续下载」。自绘对话框层把键盘语义（`defaultId`）与视觉强调（`primaryId`）拆成两个参数，迁移时照抄会悄悄改掉产品决策。另外 `primaryId` 的缺省推导在"主操作恰好就是 cancelId"时会推反，那类调用点必须显式传值。
 39. **不要给自绘对话框省掉 `did-start-loading` 的收敛逻辑**。注入的 DOM 随文档一起销毁，页面一导航，还挂着的对话框永远不会回传 `dsh-dialog-response`，调用方 `await` 的 Promise 会永久挂起（界面表现是"点了没反应"，且不会抛错）。`initDshDialog` 里的 `did-start-loading` 钩子按 `cancelId` 主动收敛并清空队列，是这条链路的唯一保险。
-40. **不要把玻璃透明度当纯视觉参数随便调**。卡片底色与文字色是一组耦合约束，调任何一个都要重算另一个：
-    - 0.72 白叠在 0.35 深色遮罩上，合成后的实际底色约 `#f0f0f2`，**不是白色**；
-    - 实心卡片时代用的 `--dsh-dlg-muted: #6b7280` 落到这个底色上只有 **4.31:1**，而 detail 是 12.5px 小字（AA 门槛 4.5:1），不达标。现值 `#5b6570` 是 5.16:1；
-    - 提高透明度（如 0.72 → 0.55）会进一步吃掉对比度，饱和背景（彩色图片、深色代码块）上正文最先崩。`docs/dialog-preview.html` 里刻意放了一块高饱和渐变与深色代码块作为最坏情况，`node scripts/preview-dialog.js` 重新生成。
-    - 往上调到 0.80 可以在保住玻璃感的同时多留一点对比度余量。
+40. **不要把浮层配色当纯视觉参数随便调**。浅色是磨砂玻璃（卡片半透明、文字色与合成底色耦合），深色是**不透明 `#202020`**（文字色直接对实心底色），两者是两套约束，调任何一处都要分别重算：
+    - **浅色**：0.72 白叠在 0.35 深色遮罩上，合成后的实际底色约 `#f0f0f2`，**不是白色**；实心卡片时代用的 `--dsh-dlg-muted: #6b7280` 落到这个底色上只有 **4.31:1**，而 detail 是 12.5px 小字（AA 门槛 4.5:1），不达标。现值 `#5b6570` 是 5.16:1。提高透明度（如 0.72 → 0.55）会进一步吃掉对比度，饱和背景（彩色图片、深色代码块）上正文最先崩；往上调到 0.80 可以保住玻璃感又多留一点余量。`docs/dialog-preview.html` 里刻意放了一块高饱和渐变与深色代码块作为最坏情况。
+    - **深色**：`--dsh-dlg-glass` / `--dsh-dlg-glass-strong` 都是 `#202020` 不透明，正文 `#d1d5db` ≈ 11:1、muted `#9ca3af` ≈ 6.4:1，余量充足，但要注意**深色透明层会隐形**的问题：`--dsh-dlg-code-bg` 必须用白色透明层（`rgba(255,255,255,.08)`），否则模态框代码块与面板图标占位底几乎看不见。这条由 `assertReferenceStyling()` 断言守着。
+    - **模糊必须用令牌关闭，不要删 `backdrop-filter` 那一行**：`--dsh-dlg-blur` / `-strong` / `-tooltip` 在深色置 `none`，删掉声明浅色就没玻璃了。遮罩层（`.backdrop` 的 `blur(4–6px)`）不要跟着关。
+    - 深色卡片底色 `#202020` 与深色页面仍能区分，`--dsh-dlg-glass-border` 保留 `rgba(255,255,255,.08)` 一圈极淡描边作为边界；`--dsh-dlg-highlight` 置 `transparent` 去掉内高光（CSS 结构不变，`inset ... transparent` 是 no-op）。
 41. **不要让预览页绕过 `buildDialogSpec()`**。真实事故：`pickIndex` 的 `maxIndex` 被硬写成 `0`，任何大于 0 的 `defaultId` / `primaryId` 都被判越界丢弃、悄悄退回 0 ——「退出确认」与「更新运行包」回车即执行、「客户端下载中」的破坏性「取消下载」被画成主按钮。之所以一直没发现，是因为预览页的 spec **手写 `variant` 字段**，只验证了 CSS 与 DOM，**从未验证过下标推导**。现在 `buildDialogSpec` 已导出、预览走真实推导，且生成时会跑 `assertDerivation()` 断言 5 个用例的 `defaultId` / `primaryId` / `detailTone` / `tight`。加新调用点时也要把对应 spec 补进 `scripts/preview-dialog.js` 的 `CASES`。
 42. **不要在 Shadow DOM 迁移后还用 `document.querySelector` 找模态框内部节点**。`injected-modal` 挂 Shadow DOM 后，正文、GitHub 按钮、锚点目标都查不到（症状：更新日志永远"加载中"、关于框按钮点了没反应、目录链接点了不跳）。唯一入口是 `window.__dshModal.{shadow, update, cleanup}`，见 §6.7。
 43. **不要把模态框的 `card` 挂到 `root` 上**。它必须在 `backdrop` 内部——`backdrop` 才是负责 flex 居中的那个容器，且带 `z-index` + 半透明 + `backdrop-filter`，会把平级的卡片盖住糊掉。真机踩过：关于框 + 两个更新日志三个入口全废，走 `showDshMessageBox` 的「检查更新…」却正常，正是这个差异让人定位到。`assertModalStructure()` 会在预览生成期把这类错炸出来，改注入代码后务必重跑 `node scripts/preview-dialog.js`。
-44. **不要把 `--dsh-modal-*` 顺手玻璃化**。这套旧实色令牌是**客户端更新下载进度横幅 `#dsh-ub` 唯一在用的**（`APP_UPDATE_BANNER_CSS`）。模态框已改用 `--dsh-dlg-*`，`--dsh-modal-*` 只剩横幅一个消费者；改它会连带把横幅也变成玻璃，而横幅是通栏贴顶的、玻璃化并不合适。
+44. **不要把 `--dsh-modal-*` 顺手玻璃化**。这套旧实色令牌是**客户端更新下载进度横幅 `#dsh-ub` 唯一在用的**（`APP_UPDATE_BANNER_CSS`）。模态框已改用 `--dsh-dlg-*`，`--dsh-modal-*` 只剩横幅一个消费者；改它会连带把横幅也变成玻璃，而横幅是通栏贴顶的、玻璃化并不合适。深色下 `--dsh-modal-bg` 是 `#000000`（纯黑贴顶通栏）、`--dsh-modal-border` 是 `rgba(255,255,255,.12)` 发丝线——这是实色令牌的取值调整，不是玻璃化。
 45. **不要把注入式 UI 的实现留在 `index.ts` 里**。`index.ts` 一旦被 import 就会拉进 electron 副作用，预览脚本在沙箱里根本加载不了它——这正是模态框曾长期零覆盖、只能靠真机发现问题的原因。注入式 UI 的 CSS / 宿主脚本 / 构建器一律放独立模块（`dsh-dialog.ts` / `injected-modal.ts` / `injected-theme.ts`），预览脚本用 esbuild + require 打桩加载，与生产同源。
 46. **不要放松 `notice.ts` 的校验，也不要改成"部分渲染"**。公告内容来自远端、会渲染进页面，`parseNotices` 的任一条拒绝都是**整批丢弃**的——这是刻意的（半截公告比没有公告更糟），不是 bug。`javascript:` / `data:` 链接被挡、外链只走 `open-external`、正文只 `textContent`，三条都由 `scripts/preview-notice.js` 的生成期断言守着；改校验必须同步改断言，并确认新断言真的会拒（拿一个反例喂给它）。
 47. **不要给公告横幅写死 `top`**。它必须运行时读 `#dsh-ub` 的 `offsetHeight`：客户端更新下载中时更新横幅占据顶部，公告要下移避让。写死 0 会让两条横幅重叠。两条注入刻意不共享状态——靠读对方实际布局避让，加一个共享变量就多了一处可能失配的地方。
@@ -885,6 +918,18 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
     - **删除失败必须留日志**（`console.warn` 带上目录名与 errno）。静默的删除失败和静默的写入失败一样：功能看起来完全正常，磁盘慢慢被吃光，没有任何症状提示。
     - 诊断线索：「目录存在但里面 0 个文件」= 删除进行到一半失败，不是「本来就没东西」。
     - 配套：**清扫逻辑要放在「已就绪就 return」的分支之前**。否则正常启动路径永远不执行清扫，残留永远等不到被清。本项目 `ensureBundledDshExtracted()` 的 `sweepStaleDirs()` 因此被提到标记比对之前——它原本排在后面，导致每次升级必泄漏。
+60. **不要为了实现「以后自动下载并安装更新」去打开 `autoUpdater.autoDownload` 或 `autoInstallOnAppQuit`**。
+    - 这两个 `false` 是 §6.5 踩过坑之后定下来的刻意默认：`autoDownload` 关掉的是 electron-updater 自带的「一发现就自动下」，我们的检测走 `app-update.ts`（有完整三态错误处理），两条链路要各跑一次才能对齐；`autoInstallOnAppQuit` 在 v6 **默认为 true**，保持默认会让用户点了「稍后」也在下次退出时被静默安装。
+    - 自动更新走**自建链路**：检测命中 → `downloadAppUpdate()` → 下载完成 → `deferInstallToNextLaunch()` → 下次退出时 `confirmAndQuit()` → `quitAndInstallAppUpdate(true)` 静默安装。既有代码全都现成，**不需要动 electron-updater 的任何开关**。
+    - 语义是「**下次启动时自动安装**」，不是在会话中间突然重启应用。手动「检查更新…」路径**永远弹面板**、不自动下载。
+61. **不要在把更新类弹窗迁到更新面板时丢掉 `defaultId` / `cancelId` 的键盘语义**。
+    - `defaultId` 管初始焦点与回车，`cancelId` 管 Esc，两者**都是键盘语义**，跟视觉主按钮是两回事。更新面板把它们拆成两个**必填**字段，就是为了让调用点没法「顺手不写」。
+    - 两处刻意值必须保住：客户端「下载中」的 defaultId 与 cancelId **都**指向「继续下载」（误按回车不能丢掉已下的 251MB）；DSH 运行包更新的 defaultId 与 cancelId **都**指向「稍后」（回车不得直接触发一次打断会话的更新）。
+    - 这层语义只有一处真相：`update-panel.ts` 的 `PANEL_*` 预设。调用点**引用预设**，不要就地重写按钮数组或下标；改预设就改预设，并把对应断言补进 `scripts/preview-dialog.js`。
+62. **不要把更新面板的实现写进 `index.ts`**。
+    - 面板的 CSS / spec 类型 / 纯函数构造器一律放 `src/main/update-panel.ts`（**刻意不 import electron**），这样 `scripts/preview-dialog.js` 能在沙箱里加载它、驱动真实的 `buildUpdatePanelSpec()` 做生成期断言。
+    - `index.ts` 只负责编排：什么时候弹、弹什么内容、用户按下按钮后做什么。这条与 §12.1 第 45 条（注入式 UI 实现不进 `index.ts`）是同一条纪律。
+    - 面板必须复用 `dsh-dialog.ts` 的**同一条队列、同一段宿主脚本、同一条 IPC 通道**（`spec.kind === 'panel'` 分流）。另起一层等于把「单浮层」「发送方守卫」「导航打断收敛」三件事复制一遍，还会出现两个队列互相踩。
 
 
 ### 12.2 改之前要确认
@@ -896,10 +941,13 @@ electron-builder 25 的 `NsisTarget.js` 里 `USE_NSIS_BUILT_IN_COMPRESSOR = fals
 - 修改渲染层 HTML 的 CSP 头 → 当前 `default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'`，DSH Web UI 通过 `loadURL` 加载不受这个 CSP 影响（每个 webContents 独立），但 loading/error 页的 inline 脚本依赖 `'unsafe-inline'`，不要直接删。titlebar.html 额外有 `img-src 'self' data:`（应用图标走 data URL），删掉图标会消失。
 - 修改标题栏配色 → 必须同步两处：`titleBarOverlay`（系统三键区域颜色）与 `titlebar.html` 的 body 背景，漏一处会出现色差断层；当前为深色（#202020 / 符号 #e6e6e6）。
 - 修改 Preload 暴露的 `window.dsh.*` API 名或形状 → 错误页 JS 强耦合，改完必须同步改 `error.html`。
-- 把 `dsh-dialog.ts` 的 `showDshMessageBox` 铺开到更多调用点 → 19 处已全部迁移，这是新增弹窗的默认入口；不要再写 `dialog.showMessageBox`。每处都要先确认 `defaultId` / `cancelId` 是刻意的产品决策还是随手写的，并逐个核对 `primaryId`（推导在「主操作 = cancelId」时会反）。样式改动后跑 `node scripts/preview-dialog.js` 看 `docs/dialog-preview.html`（含 1/2/3/4 按钮态与最坏情况背景）。
+- 把 `dsh-dialog.ts` 的 `showDshMessageBox` 铺开到更多调用点 → 19 处已全部迁移，这是新增弹窗的默认入口；不要再写 `dialog.showMessageBox`。**但更新类提示另有归属**：走 `showUpdatePanel()` + `update-panel.ts` 的 `PANEL_*` 预设（见 §12.1 第 61、62 条）。旧卡片每处都要先确认 `defaultId` / `cancelId` 是刻意的产品决策还是随手写的，并逐个核对 `primaryId`（推导在「主操作 = cancelId」时会反）。样式改动后跑 `node scripts/preview-dialog.js` 看 `docs/dialog-preview.html`（含 1/2/3/4 按钮态、最坏情况背景与面板深链）。
 - 需要「先切页面、再弹对话框」→ 必须 `loadXxxPage()` 后紧跟 `await waitForNextDialogHost()`，见 §6.7「先后顺序」行。
 - 新增 `showDshMessageBox` 调用点 → 显式判断该 `detail` 属于风险类（传 `detailTone: 'notice'`）还是版本信息类（缺省 `meta`），并把对应 spec 补进 `scripts/preview-dialog.js` 的 `CASES`（见 §12.1 第 41 条）。
-- 修改 `injected-theme.ts` 的 `--dsh-dlg-*` 令牌 → 同时影响自绘对话框的明暗两套；`--dsh-modal-*` 还被更新日志/关于模态框共用，误改会波及那两个。**玻璃透明度与文字色是耦合的**，单改一个会让对比度不达标，见 §12.1 第 40 条。改完跑 `node scripts/preview-dialog.js` 看 `docs/dialog-preview.html`（含高饱和渐变与深色代码块的最坏情况背景）。
+- 改更新面板（`update-panel.ts`）的样式 / 按钮预设 / spec 推导 → **必须重跑 `node scripts/preview-dialog.js`**（`assertUpdatePanelSpec()` + `assertUpdatePanelStructure()` + `assertReferenceStyling()` 任一不过直接抛错、中止生成），并看 `docs/dialog-preview.html` 的 `#panel` / `#panel-dark` / `#panel-runtime` / `#panel-phases` / `#panel-picker` 五个深链。新增/改动面板形态要把对应 spec 补进 `PANEL_CASES`。改 `defaultId` / `cancelId` / 按钮顺序属于**产品决策变更**，不是实现细节——动之前先确认。
+- 新增更新类弹窗调用点 → 走 `showUpdatePanel()` + `update-panel.ts` 的 `PANEL_*` 预设，**不要**再写 `showDshMessageBox`；非更新类提示（退出确认 / 公告 / 组件状态）继续走旧卡片。
+- 改 `settings-store.ts` 的持久化形状 → 它是 `settings.json` 的**唯一**写方（`theme-store.ts` 也委托它）。改字段名要同步 `loadThemeSetting` / `saveThemeSetting` 的委托逻辑；写失败只记日志、读失败当空，这两条策略不要改。
+- 修改 `injected-theme.ts` 的 `--dsh-dlg-*` 令牌 → 同时影响自绘对话框、更新面板、模态框、公告横幅、余额 tooltip 的明暗两套；`--dsh-modal-*` 只剩下载进度横幅 `#dsh-ub` 一个消费者（见 §12.1 第 44 条）。**浅色下透明度与文字色耦合、深色下实心底色与代码块底色耦合**，单改一个会让对比度不达标或元素隐形，见 §12.1 第 40 条。改完跑 `node scripts/preview-dialog.js`（含 `assertReferenceStyling()` 的深色底/按钮规格断言）与 `node scripts/preview-notice.js`，分别看 `docs/dialog-preview.html`（含高饱和渐变与深色代码块的最坏情况背景）与 `docs/notice-preview.html`。
 - 升级 Electron 大版本 → 必须同时做三件事：查官方 `breaking-changes.md` 对应区间并对本项目逐条 grep；单独量 `node_modules/electron/dist/electron.exe` 体积对比基线；确认 `node_modules/electron/dist/` 已就位（见 §12.1 第 51、52 条）。目标是回到**官方支持窗口内**（最新 3 个稳定大版本），不是追最新版本号。
 - 改 `dsh-components.ts` 的组件清单 / `NODE_PATH` 注入 / `electron-builder.yml` 的组件排除规则 → 三者必须**同时**改。漏掉排除规则等于白写下载逻辑；漏掉 `NODE_PATH` 则下载装好了 DSH 仍然报缺件。另外要实跑一次「无组件 → 触发下载 → 转换成功」，只验证 `isLibreOfficeKitReady()` 返回 true 不足以证明端到端可用（`prebuilds.json` 的 sha256 指纹运行时不校验，但 LibreOffice 自身的 `program/` 完整性不是我们能断言的）。
 

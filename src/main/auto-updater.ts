@@ -292,6 +292,20 @@ export function markUpdateAvailable(version: string): void {
 }
 
 /**
+ * 撤回「已发现新版本」的标记，退回 idle
+ *
+ * 供「跳过此版本」使用：用户明确表示这个版本不要再提示，标题栏的「更新」
+ * 按钮就该随之消失（否则按钮一直亮着，等于没跳过）。
+ *
+ * 只在 available / error 阶段生效：下载中或已下载完成时撤回标记没有意义，
+ * 那两个阶段有各自的进度/安装语义，不该被一个「跳过」动作打断。
+ */
+export function clearUpdateAvailable(): void {
+  if (snapshot.phase !== 'available' && snapshot.phase !== 'error') return
+  patch({ phase: 'idle', version: null, error: null, installOnNextLaunch: false })
+}
+
+/**
  * 确保已拿到可下载的更新信息（electron-updater 要求 downloadUpdate 前先 checkForUpdates）
  *
  * 同一个 promise 复用，天然挡住并发重复请求（横幅连点「重试」也只会打一次源站）。

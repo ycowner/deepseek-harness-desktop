@@ -16,6 +16,10 @@ const OVERLAY_COLORS: Record<EffectiveTheme, { color: string; symbolColor: strin
   light: { color: '#f3f3f3', symbolColor: '#333333' }
 }
 
+// 原生 UI（弹出菜单 / 右键菜单 / 文件对话框）跟随应用设置，而非仅跟随系统。
+// 必须在窗口创建前赋值：原生菜单在 popup 时才取主题，但窗口级原生控件也依赖它。
+nativeTheme.themeSource = loadThemeSetting()
+
 // 当前生效主题（供 createWindow 初始化 titleBarOverlay 等读取）
 let currentEffective: EffectiveTheme = resolveEffective(loadThemeSetting())
 
@@ -111,7 +115,12 @@ export function applyEmulateMedia(webContents: Electron.WebContents, scheme: Eff
  * 供三个入口复用：用户切换设置、系统明暗变化（跟随系统时）、启动初始化。
  */
 export function applyTheme(): void {
-  currentEffective = resolveEffective(loadThemeSetting())
+  const setting = loadThemeSetting()
+  // 原生菜单等系统 UI 由 nativeTheme 驱动，与应用自定义配色的标题栏/页面是两条链路
+  if (nativeTheme.themeSource !== setting) {
+    nativeTheme.themeSource = setting
+  }
+  currentEffective = resolveEffective(setting)
   if (lastApplied === currentEffective && lastApplied !== null) return
 
   lastApplied = currentEffective
@@ -128,7 +137,7 @@ export function applyTheme(): void {
   }
 
   // 2. 广播到标题栏页面与内容视图（页面据此切换 data-theme）
-  const payload = { setting: loadThemeSetting(), effective: currentEffective }
+  const payload = { setting, effective: currentEffective }
   if (!mainWindow.webContents.isDestroyed()) {
     mainWindow.webContents.send('theme-changed', payload)
   }

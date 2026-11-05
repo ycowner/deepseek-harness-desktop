@@ -31,10 +31,11 @@ const KIND_ICON: Record<ModalKind, string> = { info: 'info', doc: 'doc' }
 /**
  * 模态框样式
  *
- * 玻璃参数**比对话框弱一档**（对话框 blur 20px / 0.72，本模块 12px / 0.82）：
- * 模态框面积大得多且装长文档，两层大面积 backdrop-filter 叠加时弱显卡上开销明显，
- * 长文在半透明卡片上滚动也更吃力。降档后对比度反而更宽松（muted 从 4.78:1
- * 升到 5.7:1），不需要动 --dsh-dlg-muted。
+ * 模糊参数**比对话框弱一档**（对话框 --dsh-dlg-blur 20px，本模块指向
+ * --dsh-dlg-blur-strong 12px）：模态框面积大得多且装长文档，大面积
+ * backdrop-filter 在弱显卡上开销明显，长文在半透明卡片上滚动也更吃力。
+ * 浅色仍是 0.82 的玻璃；深色与对话框一致改为不透明纯黑 + 极淡描边，
+ * 此时 blur 令牌为 none，这两条取舍都不再产生开销。
  *
  * 遮罩与卡片的结构是**父子**（card 在 backdrop 内）：backdrop 才是那个负责
  * flex 居中的容器，卡片若与它平级，就会顶到左上角；而 backdrop 带 z-index，
@@ -56,10 +57,10 @@ export const MODAL_CSS = `
   width: min(720px, 92vw); max-height: 80vh;
   display: flex; flex-direction: column;
   background: var(--dsh-dlg-glass-strong);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: var(--dsh-dlg-blur-strong);
+  backdrop-filter: var(--dsh-dlg-blur-strong);
   border: 1px solid var(--dsh-dlg-glass-border);
-  border-radius: 24px;
+  border-radius: 16px;
   box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);
   color: var(--dsh-dlg-body);
   overflow: hidden;
@@ -76,7 +77,7 @@ export const MODAL_CSS = `
 .head-title { font-size: 15px; font-weight: 600; color: var(--dsh-dlg-fg); }
 .close {
   width: 28px; height: 28px; margin-left: auto;
-  border: 1px solid transparent; border-radius: 8px;
+  border: 1px solid transparent; border-radius: 10px;
   background: transparent; color: var(--dsh-dlg-muted);
   font-size: 18px; line-height: 1; cursor: pointer;
 }

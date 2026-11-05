@@ -413,9 +413,11 @@ GitHub releases/latest API  →  GET {publish.url}/latest.yml
 | --- | --- |
 | `update-available` | 只 `markUpdateAvailable()` → 标题栏亮起「更新」按钮，**不下载** |
 | `download-progress` | 节流后同时推标题栏按钮（文案变「下载中 N%」）与 DSH 页顶部进度横幅 |
-| `update-downloaded` | 进度横幅隐藏，按钮恢复为「更新」，点开是 [立即重启安装]/[下次启动时安装]/[取消] |
-| `error` | 按钮保留，点开是 [重试下载] / [浏览器下载] / [取消] |
+| `update-downloaded` | 进度横幅隐藏，按钮恢复为「更新」，点开是更新面板 [取消]/[下次启动时安装]/[立即重启安装] |
+| `error` | 按钮保留，点开是更新面板 [取消]/[浏览器下载]/[重试下载] |
 | `update-cancelled`（用户主动取消） | 状态退回 `available`，半截文件由 `removeFileIfAny()` 清理，按钮恢复为「更新」 |
+
+**发布日期**：`latest.yml` 顶层一直带 `releaseDate` 字段（ISO-8601），`parseLatestYml()` 已把它解析出来随 `AppUpdateInfo.releaseDate` 传出，供更新面板的日期行渲染。**解析不到就整行不渲染**，不编造日期、不加额外网络请求。
 
 ### 5.5 安装交互
 
@@ -439,6 +441,12 @@ autoUpdater.autoInstallEvent = "manual"  // 关键：不自动装，等用户决
 - 选「取消」不改变 `lastPromptedDownloadVersion`，用户点按钮仍能手动补弹。
 - 当前**不判窗口前台**（最小化时也会弹），要改成「仅前台」在 `promptInstallTiming()` 开头加一行 `if (!mainWindow.isFocused()) return`。
 - `downloaded` 阶段横幅隐藏、标题栏按钮回退为「更新」——这正是「不弹窗」事故的现象表现。
+
+**★ 界面形态：所有更新类提示已改为「更新面板」**（`src/main/update-panel.ts`，`dsh-dialog` 的 `kind:'panel'` 变体）。用户参考图的形态：应用图标 + 大标题（版本号内联着色）+ 日历日期行 + 复选框「以后自动下载并安装更新」+ 底部左右分组按钮（左「跳过此版本」，右「稍后」+ 主按钮）。
+
+- 面板复用 `dsh-dialog` 的**同一条队列、同一段宿主脚本、同一条 IPC 通道**，因此与旧对话框不会同时出现；按钮预设集中在 `update-panel.ts` 的 `PANEL_*`，`defaultId` / `cancelId` 是键盘语义、必填。
+- **复选框是 opt-in 的自动更新开关**：勾选后写入 `settings.json` 的 `update.autoUpdate`，此后检测到的新客户端版本**自动下载**、下载完成**不弹面板**、直接 `deferInstallToNextLaunch()`（下次启动时静默安装）。**不打开** `autoDownload` / `autoInstallOnAppQuit`——自动更新走本项目自建的「检测 → `downloadAppUpdate()` → `deferInstallToNextLaunch()` → 退出时 `quitAndInstallAppUpdate(true)`」链路。手动「检查更新…」**始终弹面板**、不自动下载。
+- **「跳过此版本」是持久化跳过**（客户端与运行包各记各的，上限 20 条），命中时自动路径不点亮标题栏按钮；出现更高版本自动恢复正常提示。手动检查始终如实展示最新版本。
 
 **这里有个额外收益**：`build/installer.nsh` 的方案 B' 正是为 `--updated` 参数设计的（`installer.nsh:16-27`）。当前手动双击升级**永远不带** `--updated`，导致 keep-shortcuts 链路断裂、任务栏固定图标丢失。走自动更新后，安装器会带上 `--updated`，**这个历史 bug 顺带被修好**。
 

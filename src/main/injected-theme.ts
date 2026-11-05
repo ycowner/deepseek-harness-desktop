@@ -10,9 +10,13 @@
  *   --dsh-modal-*  旧实色令牌。**唯一在用的是客户端更新下载进度横幅 #dsh-ub**
  *                  （APP_UPDATE_BANNER_CSS）。模态框已改用 --dsh-dlg-*，别顺手
  *                  玻璃化这一组——横幅是通栏贴顶的，玻璃化并不合适。
- *   --dsh-dlg-*    对话框层与模态框层共用的玻璃令牌。
- *   --dsh-dlg-glass-strong  模态框专用：面积大、装长文档，比对话框降一档模糊
- *                  半径并提高不透明度（见 AGENTS.md §6.7 的性能与可读性取舍）。
+ *   --dsh-dlg-*    对话框层与模态框层共用的表面令牌。
+ *                  浅色 = 磨砂玻璃；深色 = 不透明纯黑 + 极淡描边、无内高光
+ *                  （用户指定的参考图形态）。卡片级模糊因此拆成 --dsh-dlg-blur*
+ *                  令牌，深色下置为 none；不要删各卡片 CSS 里的 backdrop-filter
+ *                  那一行，否则浅色的玻璃也没了。
+ *   --dsh-dlg-glass-strong  模态框/公告条专用：面积大、装长文档，模糊降一档
+ *                  并提高不透明度（见 AGENTS.md §6.7 的性能与可读性取舍）。
  *
  * ICONS / FONT_STACK 放在这里而不是各自的层里，是为了让两层共用同一份图标与
  * 字体，并让 scripts/preview-dialog.js 只加载这一个文件就拿到全部注入式资产。
@@ -35,6 +39,7 @@ export const FONT_STACK =
  *   meta   → 版本信息类 detail 的 tag 标签
  *   bullet → 对话框 message 行的中性提示符
  *   doc    → 模态框头部（更新日志）
+ *   calendar → 更新面板的发布日期行
  */
 export const ICONS: Record<string, string> = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11.2v5"/><path d="M12 7.8h.01"/>',
@@ -51,7 +56,10 @@ export const ICONS: Record<string, string> = {
     '<path d="M3.5 11.2V4.8a1.3 1.3 0 0 1 1.3-1.3h6.4a1.3 1.3 0 0 1 .92.38l8.2 8.2a1.3 1.3 0 0 1 0 1.84l-6.4 6.4a1.3 1.3 0 0 1-1.84 0l-8.2-8.2a1.3 1.3 0 0 1-.38-.92z"/><path d="M7.8 7.8h.01"/>',
   // 模态框头部（更新日志）：文档轮廓 + 两条横线
   doc:
-    '<path d="M6.5 3.5h7L18 8v12.5H6.5z"/><path d="M13.5 3.5V8H18"/><path d="M9.2 12.5h5.6"/><path d="M9.2 16h5.6"/>'
+    '<path d="M6.5 3.5h7L18 8v12.5H6.5z"/><path d="M13.5 3.5V8H18"/><path d="M9.2 12.5h5.6"/><path d="M9.2 16h5.6"/>',
+  // 更新面板的发布日期行：日历外框 + 两个挂耳 + 横线
+  calendar:
+    '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M8 3.2v3.4"/><path d="M16 3.2v3.4"/><path d="M3.5 9.8h17"/>'
 }
 
 export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>> = {
@@ -78,6 +86,10 @@ export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>>
     '--dsh-dlg-glass': 'rgba(255, 255, 255, 0.72)',
     // 模态框专用：面积大、装长文档，模糊更小 + 更实
     '--dsh-dlg-glass-strong': 'rgba(255, 255, 255, 0.82)',
+    // 卡片级背景模糊（对话框/面板 20px、模态框与公告条 12px、余额 tooltip 14px）
+    '--dsh-dlg-blur': 'blur(20px) saturate(180%)',
+    '--dsh-dlg-blur-strong': 'blur(12px) saturate(180%)',
+    '--dsh-dlg-blur-tooltip': 'blur(14px) saturate(180%)',
     '--dsh-dlg-glass-border': 'rgba(255, 255, 255, 0.85)',
     '--dsh-dlg-highlight': 'rgba(255, 255, 255, 0.9)',
     '--dsh-dlg-fg': '#111827',
@@ -86,8 +98,9 @@ export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>>
     // 分隔线与 hover 一律用半透明，实体色贴在玻璃上会像一块补丁
     '--dsh-dlg-hairline': 'rgba(17, 24, 39, 0.08)',
     '--dsh-dlg-hover': 'rgba(17, 24, 39, 0.06)',
-    '--dsh-dlg-btn-surface': 'rgba(255, 255, 255, 0.55)',
-    '--dsh-dlg-btn-surface-hover': 'rgba(255, 255, 255, 0.9)',
+    // 次级/取消按钮的实底（参考图里三档按钮都是实底，不再有纯文字按钮）
+    '--dsh-dlg-btn-surface': 'rgba(17, 24, 39, 0.06)',
+    '--dsh-dlg-btn-surface-hover': 'rgba(17, 24, 39, 0.1)',
     // 风险类 detail 提示条：琥珀竖条 + 极淡琥珀底。
     // 0.08 透明度叠在玻璃合成底色 #f0f0f2 上约得 #eee6df，
     // 正文色 #374151 对它是 8.15:1，远高于门槛
@@ -100,10 +113,12 @@ export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>>
     '--dsh-dlg-code-bg': 'rgba(17, 24, 39, 0.06)',
     // 模态框正文里的链接（更新日志正文几乎没有链接，保留以防将来）
     '--dsh-dlg-link': '#0369a1',
-    // 主按钮与强调色同源，天蓝填充 + 白字
-    '--dsh-dlg-primary-bg': '#0369a1',
+    // 主按钮：参考图是白底黑字，但白底在浅色玻璃卡上不可见，故浅色反转为
+    // 近黑底 + 白字（对比度约 16.7:1）。这一组令牌现在只表示「主按钮」，
+    // 不再是通用强调色——公告 info 色条已改用 --dsh-accent。
+    '--dsh-dlg-primary-bg': '#111827',
     '--dsh-dlg-primary-fg': '#ffffff',
-    '--dsh-dlg-primary-hover': '#075985',
+    '--dsh-dlg-primary-hover': '#000000',
     '--dsh-dlg-ring': 'rgba(3, 105, 161, 0.28)',
     '--dsh-dlg-backdrop': 'rgba(17, 24, 39, 0.35)',
     // 外阴影托住卡片（脱离页面平面）；顶部受光由 inset 高光单独负责
@@ -113,12 +128,13 @@ export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>>
     '--dsh-dlg-icon-error': '#b42318'
   },
   dark: {
-    '--dsh-modal-bg': '#1f2937',
+    // 下载进度横幅 #dsh-ub 深色下也是纯黑贴顶通栏
+    '--dsh-modal-bg': '#000000',
     '--dsh-modal-text': '#d1d5db',
     '--dsh-modal-heading': '#f9fafb',
     '--dsh-modal-subtext': '#d1d5db',
     '--dsh-modal-muted': '#9ca3af',
-    '--dsh-modal-border': '#374151',
+    '--dsh-modal-border': 'rgba(255, 255, 255, 0.12)',
     '--dsh-modal-hover': '#374151',
     '--dsh-modal-code-bg': '#111827',
     '--dsh-modal-link': '#60a5fa',
@@ -127,33 +143,38 @@ export const INJECTED_THEME_VARS: Record<EffectiveTheme, Record<string, string>>
     '--dsh-accent': '#7dd3fc',
 
     // ── 对话框 ──
-    // 深色主题同样玻璃化：玻璃在深底上的通透感比浅色更明显。
-    // 表面色与既有模态框（--dsh-modal-bg）保持同色，保证同一套 UI
-    '--dsh-dlg-glass': 'rgba(31, 41, 55, 0.72)',
-    // 模态框专用：面积大、装长文档，模糊更小 + 更实
-    '--dsh-dlg-glass-strong': 'rgba(31, 41, 55, 0.82)',
-    '--dsh-dlg-glass-border': 'rgba(255, 255, 255, 0.14)',
-    '--dsh-dlg-highlight': 'rgba(255, 255, 255, 0.1)',
+    // 深色按参考图改为**不透明实心 #202020**，不再玻璃化；卡片级模糊因此整体
+    // 置为 none（遮罩层的 4–6px 模糊保留）。#202020 叠在深色页面上仍能靠
+    // 一圈 0.08 的极淡描边分辨边界，同时去掉顶部内高光。
+    '--dsh-dlg-glass': '#202020',
+    '--dsh-dlg-glass-strong': '#202020',
+    '--dsh-dlg-blur': 'none',
+    '--dsh-dlg-blur-strong': 'none',
+    '--dsh-dlg-blur-tooltip': 'none',
+    '--dsh-dlg-glass-border': 'rgba(255, 255, 255, 0.08)',
+    '--dsh-dlg-highlight': 'transparent',
     '--dsh-dlg-fg': '#f9fafb',
     '--dsh-dlg-body': '#d1d5db',
     '--dsh-dlg-muted': '#9ca3af',
     '--dsh-dlg-hairline': 'rgba(255, 255, 255, 0.1)',
     '--dsh-dlg-hover': 'rgba(255, 255, 255, 0.08)',
-    '--dsh-dlg-btn-surface': 'rgba(255, 255, 255, 0.08)',
+    '--dsh-dlg-btn-surface': 'rgba(255, 255, 255, 0.1)',
     '--dsh-dlg-btn-surface-hover': 'rgba(255, 255, 255, 0.16)',
     // 风险类 detail 提示条（深色下正文色 #d1d5db 对合成底色约 9:1）
     '--dsh-dlg-notice-bar': 'rgba(251, 191, 36, 0.55)',
     '--dsh-dlg-notice-bg': 'rgba(251, 191, 36, 0.1)',
     // 版本信息类 detail 底（muted #9ca3af 对合成底色约 5.4:1）
     '--dsh-dlg-meta-bg': 'rgba(255, 255, 255, 0.06)',
-    // 模态框正文的代码/行内代码底色
-    '--dsh-dlg-code-bg': 'rgba(0, 0, 0, 0.28)',
+    // 模态框正文的代码/行内代码底色，兼作更新面板图标占位底。
+    // **纯黑卡上不能再叠黑色透明层**（旧值 rgba(0,0,0,.28) 会完全隐形），
+    // 必须翻成白色透明层。
+    '--dsh-dlg-code-bg': 'rgba(255, 255, 255, 0.08)',
     // 模态框正文里的链接
     '--dsh-dlg-link': '#7dd3fc',
-    // 深色下强调色本身够亮，反过来做填充 + 深色文字
-    '--dsh-dlg-primary-bg': '#7dd3fc',
+    // 主按钮：与参考图一致，白底 + 深色文字（纯黑卡上对比度约 19:1）
+    '--dsh-dlg-primary-bg': '#ffffff',
     '--dsh-dlg-primary-fg': '#0b1220',
-    '--dsh-dlg-primary-hover': '#bae6fd',
+    '--dsh-dlg-primary-hover': '#e5e7eb',
     '--dsh-dlg-ring': 'rgba(125, 211, 252, 0.35)',
     '--dsh-dlg-backdrop': 'rgba(0, 0, 0, 0.5)',
     '--dsh-dlg-shadow': '0 32px 64px -16px rgba(0, 0, 0, 0.7), 0 8px 16px -8px rgba(0, 0, 0, 0.45)',

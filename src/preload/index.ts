@@ -183,9 +183,11 @@ const api = {
   },
   // 自绘对话框（dsh-dialog 注入在内容视图内）的按钮回传。
   // id 用于主进程丢弃过期点击（对话框已关闭或页面已导航），index 为按钮下标。
+  // payload 仅更新面板会带（复选框勾选态）；页内是第三方 DSH 内容，
+  // 主进程对该 payload 一律当不可信输入校验。
   // 注入脚本运行在页面主世界，能拿到本 preload 经 contextBridge 暴露的 window.dsh
-  dialogResult: (id: number, index: number): void => {
-    ipcRenderer.send('dsh-dialog-response', id, index)
+  dialogResult: (id: number, index: number, payload?: unknown): void => {
+    ipcRenderer.send('dsh-dialog-response', id, index, payload)
   },
   // 公告横幅的「× 关闭」回传已读。横幅由主进程注入内容页（notice-banner.ts），
   // 在页面主世界运行，可直接拿到本 preload 暴露的 window.dsh。

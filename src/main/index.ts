@@ -11,6 +11,7 @@ import { checkForAppUpdate, getInstalledAppVersion, cleanupLegacyInstallers, UPD
 import {
   configureAutoUpdater,
   markUpdateAvailable,
+  clearUpdateAvailable,
   getAppUpdateSnapshot,
   onAppUpdateState,
   downloadAppUpdate,
@@ -26,11 +27,24 @@ import { fetchDshChangelogs, fetchAppChangelogs, renderMarkdownToHtml, escapeHtm
 import { diag } from './update-diag'
 import { getThemeSetting, setThemeSetting, getEffectiveTheme, getOverlayColors, registerThemeHooks, registerNativeThemeListener, applyEmulateMedia } from './theme-manager'
 import { INJECTED_THEME_VARS, FONT_STACK } from './injected-theme'
-import { showDshMessageBox, initDshDialog, ensureDialogHost, waitForNextDialogHost } from './dsh-dialog'
+import { showDshMessageBox, showUpdatePanel, initDshDialog, ensureDialogHost, waitForNextDialogHost } from './dsh-dialog'
+import {
+  PANEL_CLIENT_AVAILABLE,
+  PANEL_CLIENT_DOWNLOADING,
+  PANEL_CLIENT_DOWNLOADED,
+  PANEL_CLIENT_ERROR,
+  PANEL_DSH_AVAILABLE,
+  PANEL_CHECK_PICKER,
+  PANEL_SINGLE_OK,
+  type UpdatePanelPreset,
+  type UpdatePanelOptions,
+  type UpdatePanelResult
+} from './update-panel'
 import { injectModalShell, updateModalBody } from './injected-modal'
 import { fetchNotices, planNotices, markNoticeRead, getReadNoticeIds, type Notice } from './notice'
 import { syncNoticeBanner } from './notice-banner'
 import { refreshBalance, startBalancePolling, stopBalancePolling, getBalanceSnapshot, onBalanceUpdate, type BalanceSnapshot } from './deepseek-balance'
+import { loadUpdateSettings, saveUpdateSettings, addSkippedVersion, isVersionSkipped } from './settings-store'
 
 // 自定义标题栏高度（与 BrowserWindow 的 titleBarOverlay.height 保持一致）
 const TITLEBAR_HEIGHT = 48
@@ -67,6 +81,10 @@ let isShowingChangelog = false
 // 不依赖这里的 URL。更新状态（下载中/已完成等）一律从 auto-updater 的快照取，本文件不另存一份。
 let pendingAppUpdateVersion: string | null = null
 let pendingAppUpdateDownloadUrl: string | null = null
+
+// 客户端更新的发布日期（ISO-8601，来自 latest.yml 的顶层 releaseDate）。
+// 供更新面板的日期行渲染；解析不到时为 null，日期行整行不渲染（不编造日期）。
+let pendingAppUpdateReleaseDate: string | null = null
 
 // 待安装的 DSH 运行包版本号（由 checkDshUpdateAndPrompt 赋值，标题栏「更新DSH」IPC 与 performUpdate 读取）
 let pendingDshUpdateVersion: string | null = null
@@ -183,6 +201,25 @@ function getWindowIconPath(): string {
 }
 
 /**
+ * 读取应用图标为 PNG data URL
+ *
+ * 走 data URL 规避两种环境的路径问题：dev 页面在 localhost 引用不到 build/ 目录、
+ * 打包后页面在 asar 内而图标在 asar 外。失败返回空串（调用方据此隐藏图标位，
+ * 布局不会塌）。
+ *
+ * 标题栏（32px）与更新面板（64px）共用本函数，避免两处各写一份图标读取逻辑。
+ */
+function getAppIconDataUrl(size: number): string {
+  try {
+    const icon = nativeImage.createFromPath(getWindowIconPath())
+    if (icon.isEmpty()) return ''
+    return icon.resize({ width: size }).toDataURL()
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 校验 IPC 调用方来源是否可信
  *
  * 仅允许本地 file:// 协议（loading/error 页）或 loopback http(s)（DSH 页面），
@@ -243,6 +280,73 @@ function syncInjectedTheme(): void {
 }
 
 /**
+ * 将 DSH Desktop 标题栏主题同步到 DSH Web UI 页面
+ *
+ * DSH Web UI 自身有独立主题系统（ui-theme 命名空间），其主题 DOM 标记为：
+ *   - html[data-ds-theme-source]：preference 来源（light/dark/system）
+ *   - body[data-ds-dark-theme]：实际生效的暗色标记
+ *   - html.style.color-scheme：原生 UI（滚动条等）的 color-scheme
+ *
+ * 本函数通过 executeJavaScript 显式覆盖上述标记，并用 MutationObserver 防止
+ * DSH 自身的 ThemePresenter 在 theme/change 时把标记改回去。
+ */
+function syncDshWebTheme(): void {
+  if (!dshView || dshView.webContents.isDestroyed()) return
+  if (!isDshPageLoaded()) return
+
+  const setting = getThemeSetting()
+  const effective = getEffectiveTheme()
+  const code = `
+    (function () {
+      // 期望值必须挂在 window 上供 observer 每次读取：observer 只安装一次，
+      // 若闭包记住首次注入的主题，后续切换会被它按旧值拉回去（运行中切换失效）。
+      window.__DSH_DESKTOP_THEME__ = {
+        preference: ${JSON.stringify(setting)},
+        effective: ${JSON.stringify(effective)}
+      }
+
+      function desired() {
+        const s = window.__DSH_DESKTOP_THEME__
+        return { preference: s.preference, effective: s.effective, dark: s.effective === 'dark' }
+      }
+
+      function apply() {
+        const d = desired()
+        document.documentElement.dataset.dsThemeSource = d.preference
+        document.body.toggleAttribute('data-ds-dark-theme', d.dark)
+        document.documentElement.style.colorScheme = d.effective
+      }
+
+      apply()
+
+      if (!window.__DSH_DESKTOP_THEME_OBSERVER__) {
+        const observer = new MutationObserver(() => {
+          const d = desired()
+          const needReapply =
+            document.documentElement.dataset.dsThemeSource !== d.preference ||
+            document.body.hasAttribute('data-ds-dark-theme') !== d.dark ||
+            document.documentElement.style.colorScheme !== d.effective
+          if (needReapply) apply()
+        })
+        observer.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ['data-ds-theme-source', 'style']
+        })
+        observer.observe(document.body, {
+          attributes: true,
+          attributeFilter: ['data-ds-dark-theme']
+        })
+        window.__DSH_DESKTOP_THEME_OBSERVER__ = observer
+      }
+    })()
+  `
+
+  dshView.webContents.executeJavaScript(code).catch(() => {
+    /* 页面导航中静默忽略 */
+  })
+}
+
+/**
  * 余额明细 tooltip 注入样式（注入 DSH 内容页）
  *
  * 面板必须注入在 dshView（DSH 页）内而非标题栏页：dshView 子视图绘制在主
@@ -263,8 +367,8 @@ const BALANCE_TOOLTIP_CSS = [
   '  padding: 14px 16px; border-radius: 16px;',
   '  border: 1px solid var(--dsh-dlg-glass-border);',
   '  background: var(--dsh-dlg-glass);',
-  '  -webkit-backdrop-filter: blur(14px) saturate(180%);',
-  '  backdrop-filter: blur(14px) saturate(180%);',
+  '  -webkit-backdrop-filter: var(--dsh-dlg-blur-tooltip);',
+  '  backdrop-filter: var(--dsh-dlg-blur-tooltip);',
   '  box-shadow: var(--dsh-dlg-shadow), inset 0 1px 0 0 var(--dsh-dlg-highlight);',
   '  color: var(--dsh-dlg-body); font-size: 12px; line-height: 1.7;',
   '  z-index: 2147483646; pointer-events: none;',
@@ -678,6 +782,121 @@ function stopDownloadPeriodicReprojection(): void {
   reprojectTimer = null
 }
 
+// ─────────────────── 版本更新面板（update-panel）的调用点封装 ───────────────────
+//
+// 面板的按钮布局与键盘语义（defaultId / cancelId）集中在 update-panel.ts 的预设里，
+// 这里只负责「面板里显示什么」与「用户按下按钮后做什么」。迁移时最容易丢的就是
+// defaultId / cancelId 这一层——它是键盘语义而非视觉强调（AGENTS.md §12.1 #38），
+// 所以调用点一律引用预设，不就地改写。
+
+/** 把按钮预设与本次调用的内容拼成面板选项 */
+function panelOptions(
+  preset: UpdatePanelPreset,
+  overrides: Partial<UpdatePanelOptions>
+): UpdatePanelOptions {
+  return {
+    title: '',
+    buttons: preset.buttons,
+    defaultId: preset.defaultId,
+    cancelId: preset.cancelId,
+    ...overrides
+  }
+}
+
+/**
+ * 落盘「以后自动下载并安装更新」的勾选态
+ *
+ * 复选框是**偏好**而不是一次性动作：面板无论点哪个按钮关闭，勾选态都要写回，
+ * 但只对**此后**检测到的版本生效——用户点「稍后」仍然是「这一次不装」。
+ */
+function persistAutoUpdatePreference(checked: boolean): void {
+  if (loadUpdateSettings().autoUpdate === checked) return
+  saveUpdateSettings({ autoUpdate: checked })
+}
+
+/**
+ * 客户端「发现新版本」面板
+ *
+ * 是唯一带复选框的面板（D5：DSH 运行包全程手动确认，不显示复选框）。
+ * 图标取应用自身图标；日期取 latest.yml 的 releaseDate，取不到就整行不渲染。
+ */
+function clientAvailablePanelOptions(version: string): UpdatePanelOptions {
+  return panelOptions(PANEL_CLIENT_AVAILABLE, {
+    title: '发现新版本',
+    version: version ? `v${version}` : '',
+    appIcon: getAppIconDataUrl(64),
+    releaseDate: pendingAppUpdateReleaseDate,
+    message: `当前版本 v${getInstalledAppVersion()}`,
+    detail: '点击「下载更新」开始下载，下载期间 DSH 页面顶部会显示进度。',
+    checkbox: {
+      label: '以后自动下载并安装更新',
+      checked: loadUpdateSettings().autoUpdate
+    }
+  })
+}
+
+/**
+ * 处理客户端「发现新版本」面板的按钮结果
+ *
+ * 按钮下标与 PANEL_CLIENT_AVAILABLE 一一对应：
+ *   0 = 跳过此版本 / 1 = 稍后 / 2 = 下载更新
+ */
+function handleClientAvailableResult(version: string, result: UpdatePanelResult): void {
+  persistAutoUpdatePreference(result.checked)
+  if (result.response === 0) {
+    // 跳过：记住版本号并撤回标题栏的「更新」按钮，否则按钮一直亮着等于没跳过
+    if (version) addSkippedVersion('client', version)
+    clearUpdateAvailable()
+    pushTitlebarUpdateState()
+    console.log(`[DSH] 用户跳过客户端版本 v${version}`)
+    return
+  }
+  if (result.response === 2) {
+    void startAppUpdateDownload()
+  }
+}
+
+/**
+ * DSH 运行包「发现新版本」面板
+ *
+ * 不带图标（运行包不是本应用）、不带日期（取不到发布日期，按 D6 整行不渲染）、
+ * 不带复选框（运行包全程手动确认）。
+ */
+function dshAvailablePanelOptions(version: string, currentVersion: string): UpdatePanelOptions {
+  return panelOptions(PANEL_DSH_AVAILABLE, {
+    title: '发现新版本',
+    version: `v${version}`,
+    message: `DSH 运行包当前版本 v${currentVersion}`,
+    detail: '更新过程中 DSH 服务会停止，下载并安装新运行包后自动重启。当前进行中的会话会中断。',
+    detailTone: 'notice'
+  })
+}
+
+/**
+ * 处理 DSH 运行包「发现新版本」面板的按钮结果
+ *
+ * 按钮下标与 PANEL_DSH_AVAILABLE 一一对应：
+ *   0 = 跳过此版本 / 1 = 稍后 / 2 = 确定更新
+ *
+ * 返回值表示「是否已经开始执行更新」——「全部检查」链路据此决定要不要
+ * 继续弹客户端检查面板：更新一启动就会切 loading 页，再弹面板只会撞上
+ * 导航中的页面。
+ */
+function handleDshAvailableResult(version: string, result: UpdatePanelResult): boolean {
+  if (result.response === 0) {
+    addSkippedVersion('dsh', version)
+    pendingDshUpdateVersion = null
+    pushTitlebarUpdateState()
+    console.log(`[DSH] 用户跳过 DSH 运行包版本 v${version}`)
+    return false
+  }
+  if (result.response === 2) {
+    void performUpdate()
+    return true
+  }
+  return false
+}
+
 // ─────────────────── 下载完成后的自动安装确认 ───────────────────
 
 /** 上一次已自动弹过安装确认框的版本号，保证「一次下载至多提示一次」 */
@@ -722,6 +941,16 @@ function onClientUpdatePhaseChange(): void {
   }
 
   lastPromptedDownloadVersion = snap.version
+  // 用户勾了「以后自动下载并安装更新」：不弹安装时机面板，直接推迟到下次启动时
+  // 静默安装。这条路径复用既有的 deferInstallToNextLaunch + 退出流程，
+  // electron-updater 的 autoInstallOnAppQuit 仍是 false（AGENTS.md §6.5）
+  if (loadUpdateSettings().autoUpdate) {
+    console.log(`[DSH] 客户端更新包 v${snap.version} 下载完成，已开启自动更新 → 下次启动时安装`)
+    diag('phase', `autoUpdate 开启：v${snap.version} 下载完成，调用 deferInstallToNextLaunch()`)
+    deferInstallToNextLaunch()
+    pushTitlebarUpdateState()
+    return
+  }
   console.log(`[DSH] 客户端更新包 v${snap.version} 下载完成，自动弹出安装确认框`)
   diag('phase', `决定弹窗：v${snap.version} 下载完成，调用 promptInstallTiming()`)
   void promptInstallTiming()
@@ -755,25 +984,25 @@ async function promptInstallTiming(): Promise<void> {
   installPromptOpen = true
   try {
     const snap = getAppUpdateSnapshot()
-    diag('prompt', `即将弹自绘对话框，message="DSH Desktop 客户端 v${pendingAppUpdateVersion || snap.version || ''} 已下载完成"`)
-    const r = await showDshMessageBox({
-      type: 'info',
+    const version = pendingAppUpdateVersion || snap.version || ''
+    diag('prompt', `即将弹更新面板，version=v${version} 已下载完成`)
+    const r = await showUpdatePanel(panelOptions(PANEL_CLIENT_DOWNLOADED, {
       title: '更新已就绪',
-      message: `DSH Desktop 客户端 v${pendingAppUpdateVersion || snap.version || ''} 已下载完成`,
-      detail: `当前版本: v${getInstalledAppVersion()}\n\n可立即重启安装，也可等下次退出 DSH Desktop 时静默安装。\n安装时 Windows 会请求管理员授权（UAC）。`,
-      buttons: ['立即重启安装', '下次启动时安装', '取消'],
-      defaultId: 0,
-      cancelId: 2
-    })
-    diag('prompt', `对话框返回 response=${r.response}`)
-    if (r.response === 0) {
+      version: version ? `v${version}` : '',
+      appIcon: getAppIconDataUrl(64),
+      message: `当前版本 v${getInstalledAppVersion()}`,
+      detail: '可立即重启安装，也可等下次退出 DSH Desktop 时静默安装。\n安装时 Windows 会请求管理员授权（UAC）。'
+    }))
+    diag('prompt', `更新面板返回 response=${r.response}`)
+    // 按钮下标：0 = 取消 / 1 = 下次启动时安装 / 2 = 立即重启安装
+    if (r.response === 2) {
       await quitAndInstallAppUpdate(false)
     } else if (r.response === 1) {
       deferInstallToNextLaunch()
       pushTitlebarUpdateState()
     }
   } catch (err) {
-    diag('prompt', `安装时机对话框抛异常：${(err as Error).message}`)
+    diag('prompt', `安装时机面板抛异常：${(err as Error).message}`)
     throw err
   } finally {
     installPromptOpen = false
@@ -787,62 +1016,48 @@ async function promptInstallTiming(): Promise<void> {
  * 已是最新 → 弹 dialog 显示版本；
  * 失败 → 弹 dialog 显示错误。
  */
-async function manualCheckDshUpdate(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+async function manualCheckDshUpdate(): Promise<boolean> {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
   try {
     // includeGitHub：手动检查附加查询上游 GitHub Releases，
     // 用于「GitHub 已发布但 npm 未发布」的告知（自动路径不查）
     const result = await checkForUpdate({ includeGitHub: true })
     if (result.error) {
-      await showDshMessageBox({
-        type: 'warning',
+      await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
         title: '检查失败',
         message: 'DSH 运行包版本检查失败',
         detail: result.error,
-        detailTone: 'notice',
-        buttons: ['确定'],
-        defaultId: 0
-      })
-      return
+        detailTone: 'notice'
+      }))
+      return false
     }
     if (result.hasUpdate) {
       pendingDshUpdateVersion = result.latestVersion
       pushTitlebarUpdateState()
-      await showDshMessageBox({
-        type: 'info',
-        title: '发现新版本',
-        message: 'DSH 运行包有新版本可用',
-        detail: `当前版本: v${result.currentVersion}\n最新版本: v${result.latestVersion}\n\n顶部蓝色横幅已显示，点击横幅中的「更新 DSH」即可执行更新。`,
-        buttons: ['确定'],
-        defaultId: 0
-      })
+      const panel = await showUpdatePanel(dshAvailablePanelOptions(result.latestVersion, result.currentVersion))
+      return handleDshAvailableResult(result.latestVersion, panel)
     } else {
       // GitHub 有更新但 npm 未发布（npm latest 旧于 GitHub latest）：
       // 该版本当前不可安装，对话框附加告知，不判定为可更新
       const ghVersion = result.githubLatestVersion
       const ghNewerThanNpm = ghVersion !== undefined && compareVersions(result.latestVersion, ghVersion) < 0
-      await showDshMessageBox({
-        type: 'info',
+      await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
         title: ghNewerThanNpm ? '已是最新可安装版本' : '已是最新版本',
         message: ghNewerThanNpm ? 'DSH 运行包已是最新可安装版本' : 'DSH 运行包已是最新版本',
         detail: ghNewerThanNpm
           ? `当前版本: v${result.currentVersion}\n最新可安装版本（npm）: v${result.latestVersion}\n\n上游 GitHub 已发布 v${ghVersion}，但该版本尚未发布到 npm，暂无法自动更新。上游发布到 npm 后，客户端将自动提示更新。`
-          : `当前版本: v${result.currentVersion}\n最新版本: v${result.latestVersion}`,
-        buttons: ['确定'],
-        defaultId: 0
-      })
+          : `当前版本: v${result.currentVersion}\n最新版本: v${result.latestVersion}`
+      }))
     }
   } catch (err) {
-    await showDshMessageBox({
-      type: 'error',
+    await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
       title: '检查失败',
       message: 'DSH 运行包版本检查异常',
       detail: (err as Error).message,
-      detailTone: 'notice',
-      buttons: ['确定'],
-      defaultId: 0
-    })
+      detailTone: 'notice'
+    }))
   }
+  return false
 }
 
 /**
@@ -856,86 +1071,68 @@ async function manualCheckDshUpdate(): Promise<void> {
 async function manualCheckAppUpdate(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (!app.isPackaged) {
-    await showDshMessageBox({
-      type: 'info',
+    await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
       title: '开发环境提示',
       message: '客户端更新检查仅在打包环境生效',
-      detail: `当前应用版本: v${getInstalledAppVersion()}\n开发环境无法读取 ${UPDATE_FEED_URL}/latest.yml，请打包后验证。`,
-      buttons: ['确定'],
-      defaultId: 0
-    })
+      detail: `当前应用版本: v${getInstalledAppVersion()}\n开发环境无法读取 ${UPDATE_FEED_URL}/latest.yml，请打包后验证。`
+    }))
     return
   }
   try {
     const result = await checkForAppUpdate()
     if (result.status === 'error') {
-      await showDshMessageBox({
-        type: 'warning',
+      await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
         title: '检查失败',
         message: 'DSH Desktop 客户端版本检查失败',
         detail: result.error,
-        detailTone: 'notice',
-        buttons: ['确定'],
-        defaultId: 0
-      })
+        detailTone: 'notice'
+      }))
       return
     }
     if (result.status === 'update-available') {
-      rememberAppUpdate(result.latest.version, result.latest.downloadUrl)
+      rememberAppUpdate(result.latest.version, result.latest.downloadUrl, result.latest.releaseDate)
       const phase = getAppUpdateSnapshot().phase
       if (phase === 'downloading') {
-        await showDshMessageBox({
-          type: 'info',
+        const snap = getAppUpdateSnapshot()
+        const r = await showUpdatePanel(panelOptions(PANEL_CLIENT_DOWNLOADING, {
           title: '正在下载更新包',
-          message: 'DSH Desktop 客户端正在下载更新包',
-          detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n下载进度显示在 DSH 页面顶部，也可点标题栏的「下载中 N%」按钮取消本次下载。`,
-          buttons: ['确定'],
-          defaultId: 0
-        })
+          version: `v${result.latest.version}`,
+          appIcon: getAppIconDataUrl(64),
+          message: `DSH Desktop 客户端更新包下载中（${snap.percent}%）`,
+          detail: '取消后已下载的部分会被删除，下次点「更新」将从头开始。',
+          detailTone: 'notice'
+        }))
+        if (r.response === 0) {
+          cancelAppUpdateDownload()
+          pushTitlebarUpdateState()
+        }
         return
       }
       if (phase === 'downloaded') {
-        await showDshMessageBox({
-          type: 'info',
-          title: '更新已就绪',
-          message: 'DSH Desktop 客户端更新包已下载完成',
-          detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n标题栏「更新」按钮已就绪，点击可选择「立即重启安装」或「下次启动时安装」。`,
-          buttons: ['确定'],
-          defaultId: 0
-        })
+        // 与自动弹窗共用 promptInstallTiming，共享 installPromptOpen 互斥锁，
+        // 避免「下载完已自动弹过一次」时又弹第二个框
+        await promptInstallTiming()
         return
       }
       // 首次发现更新：只标记，不下载。下载改由用户在标题栏点「更新」后确认触发，
       // 避免 251MB 在用户不知情时就把带宽和磁盘占掉
       markUpdateAvailable(result.latest.version)
-      await showDshMessageBox({
-        type: 'info',
-        title: '发现新版本',
-        message: 'DSH Desktop 客户端有新版本可用',
-        detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}\n\n尚未开始下载。点击标题栏的「更新」按钮即可开始下载并查看进度。`,
-        buttons: ['确定'],
-        defaultId: 0
-      })
+      const panel = await showUpdatePanel(clientAvailablePanelOptions(result.latest.version))
+      handleClientAvailableResult(result.latest.version, panel)
       return
     }
-    await showDshMessageBox({
-      type: 'info',
+    await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
       title: '已是最新版本',
       message: 'DSH Desktop 客户端已是最新版本',
-      detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}`,
-      buttons: ['确定'],
-      defaultId: 0
-    })
+      detail: `当前版本: v${getInstalledAppVersion()}\n最新版本: v${result.latest.version}`
+    }))
   } catch (err) {
-    await showDshMessageBox({
-      type: 'warning',
+    await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
       title: '检查失败',
       message: 'DSH Desktop 客户端版本检查失败',
       detail: (err as Error).message,
-      detailTone: 'notice',
-      buttons: ['确定'],
-      defaultId: 0
-    })
+      detailTone: 'notice'
+    }))
   }
 }
 
@@ -950,25 +1147,20 @@ async function showUpdateCheckChoiceDialog(): Promise<void> {
   if (isCheckingUpdate) return
   isCheckingUpdate = true
   try {
-    // 按钮顺序即优先级：全部检查（主）→ 两个单项 → 取消。
-    // 下标与下面的 response 分支一一对应，改文案时必须同步改这里
-    const choice = await showDshMessageBox({
-      type: 'question',
+    // 按钮顺序即视觉顺序（左「取消」+ 右三项检查），下标与下面的分支一一对应，
+    // 改文案时必须同步改这里
+    const choice = await showUpdatePanel(panelOptions(PANEL_CHECK_PICKER, {
       title: '检查更新',
-      message: '请选择要检查的项目',
-      buttons: ['全部检查', '检查DSH运行包', '检查客户端', '取消'],
-      defaultId: 0,
-      cancelId: 3,
-      // 主按钮就是数组首位、也就是 defaultId。主按钮靠 lead 类的 min-width
-      // 撑成全组最宽——4 汉字的「全部检查」纯按内容排版会比 5 汉字 + 拉丁字母
-      // 的「检查DSH运行包」还窄，"主按钮最大"就不成立
-      primaryId: 0
-    })
-    if (choice.response === 3) return // 取消
+      message: '请选择要检查的项目'
+    }))
+    if (choice.response === 0) return // 取消
 
-    if (choice.response === 0) {
-      // 全部检查：串行执行，第一个 dialog 关闭后再弹第二个
-      await manualCheckDshUpdate()
+    if (choice.response === 3) {
+      // 全部检查：串行执行，第一个面板关闭后再弹第二个。
+      // 运行包检查若已经启动了更新（用户点了「确定更新」），就到此为止——
+      // 更新一开始就会切 loading 页，再弹客户端面板只会撞上导航中的页面
+      const dshUpdateStarted = await manualCheckDshUpdate()
+      if (dshUpdateStarted) return
       if (!mainWindow || mainWindow.isDestroyed()) return
       await manualCheckAppUpdate()
     } else if (choice.response === 1) {
@@ -1118,7 +1310,7 @@ async function showAboutModal(): Promise<void> {
         ${nodeRowHtml}
       </div>
       <div style="margin-top:6px">
-        <button class="about-repo" style="display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:12px;background:var(--dsh-dlg-primary-bg);color:var(--dsh-dlg-primary-fg);border:1px solid transparent;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub 仓库</button>
+        <button class="about-repo" style="display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:10px;background:var(--dsh-dlg-primary-bg);color:var(--dsh-dlg-primary-fg);border:1px solid transparent;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub 仓库</button>
       </div>
     </div>
   `
@@ -1210,6 +1402,7 @@ function createWindow(): void {
     syncAppUpdateBanner()
     // 公告横幅与更新横幅都随文档消失，同样需要重投影
     reprojectNoticeBanner()
+    syncDshWebTheme()
   })
 
   // SPA 软路由（history.pushState / hash 变化）：文档不重建，注入的节点还在，
@@ -1217,6 +1410,7 @@ function createWindow(): void {
   dshView.webContents.on('did-navigate-in-page', () => {
     syncAppUpdateBanner()
     reprojectNoticeBanner()
+    syncDshWebTheme()
   })
 
   // ── 渲染进程健康监听 ──
@@ -1520,6 +1714,8 @@ async function startDshAndLoad(): Promise<void> {
       syncInjectedTheme()
       // 新文档上重设 prefers-color-scheme 模拟（CDP 会话跨导航不保留，每次导航后需重设）
       applyEmulateMedia(dshView.webContents, getEffectiveTheme())
+      // 将桌面标题栏主题同步到 DSH Web UI 页面
+      syncDshWebTheme()
       // 更新窗口标题显示当前版本
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
       // 异步检查更新（不阻塞启动流程）
@@ -1556,11 +1752,16 @@ async function startDshAndLoad(): Promise<void> {
  */
 function checkDshUpdateAndPrompt(): void {
   void checkForUpdate().then(result => {
-    if (result.hasUpdate && result.latestVersion !== lastPromptedDshVersion) {
-      lastPromptedDshVersion = result.latestVersion
-      pendingDshUpdateVersion = result.latestVersion
-      pushTitlebarUpdateState()
+    if (!result.hasUpdate || result.latestVersion === lastPromptedDshVersion) return
+    lastPromptedDshVersion = result.latestVersion
+    // 用户点过「跳过此版本」：不点亮标题栏按钮、不提示。等上游发布更高版本后
+    // 才会再次出现（更高版本不在跳过列表里）
+    if (isVersionSkipped('dsh', result.latestVersion)) {
+      console.log(`[DSH] DSH 运行包 v${result.latestVersion} 已被用户跳过，不提示`)
+      return
     }
+    pendingDshUpdateVersion = result.latestVersion
+    pushTitlebarUpdateState()
   }).catch(err => {
     console.error(`[DSH] 版本检查失败: ${err.message}`)
   })
@@ -1576,6 +1777,24 @@ function startPeriodicDshUpdateCheck(): void {
   const SIX_HOURS = 6 * 60 * 60 * 1000
   setInterval(() => {
     checkDshUpdateAndPrompt()
+  }, SIX_HOURS)
+}
+
+/**
+ * 启动客户端更新定时轮询（每 6 小时检查一次）
+ *
+ * 与 DSH 运行包的轮询同构，仅打包环境生效。客户端此前**只在启动时检查一次**，
+ * 没有轮询就没有「以后自动下载并安装更新」的落点——勾了复选框，对运行期间
+ * 才发布的新版本完全无效。
+ *
+ * 走的是与启动检查完全相同的 checkForAppUpdateAndPrompt 链路，因此
+ * 「跳过此版本」与「自动下载」的语义在两条路径上一致。
+ */
+function startPeriodicAppUpdateCheck(): void {
+  if (!app.isPackaged) return
+  const SIX_HOURS = 6 * 60 * 60 * 1000
+  setInterval(() => {
+    void checkForAppUpdateAndPrompt()
   }, SIX_HOURS)
 }
 
@@ -1633,6 +1852,8 @@ async function performUpdate(): Promise<void> {
       syncInjectedTheme()
       // 新文档上重设 prefers-color-scheme 模拟（同 startDshAndLoad）
       applyEmulateMedia(dshView.webContents, getEffectiveTheme())
+      // 将桌面标题栏主题同步到 DSH Web UI 页面
+      syncDshWebTheme()
       // 更新窗口标题
       mainWindow.setTitle(`DSH Desktop v${getInstalledAppVersion()} - DSH v${getInstalledDshVersion()}`)
     }
@@ -1666,27 +1887,29 @@ async function performUpdate(): Promise<void> {
     await waitForNextDialogHost()
     // 文案与原 dialog.showErrorBox('更新失败', `DSH 更新失败: ${msg}`) 一一对应，
     // 不额外加引导语（错误页本身已经把错误信息完整展示出来了）
-    await showDshMessageBox({
-      type: 'error',
+    await showUpdatePanel(panelOptions(PANEL_SINGLE_OK, {
       title: '更新失败',
-      message: `DSH 更新失败: ${error.message}`
-    })
+      message: `DSH 更新失败: ${error.message}`,
+      detailTone: 'notice'
+    }))
   } finally {
     isUpdating = false
   }
 }
 
 /**
- * 记录已发现的新版本号与安装包直链
+ * 记录已发现的新版本号、安装包直链与发布日期
  *
- * 两者用途不同，别混淆：
+ * 三者用途不同，别混淆：
  * - 版本号用于「已是最新 / 发现新版本」等文案（electron-updater 自己的 updateInfo
  *   要到开始下载才有，这里先行一步）；
- * - 直链只喂给横幅上的「浏览器下载」兜底按钮，自动下载链路走 electron-updater 内部解析。
+ * - 直链只喂给面板上的「浏览器下载」兜底按钮，自动下载链路走 electron-updater 内部解析；
+ * - 发布日期只喂给更新面板的日期行，取不到时为 null（面板整行不渲染）。
  */
-function rememberAppUpdate(version: string, downloadUrl: string): void {
+function rememberAppUpdate(version: string, downloadUrl: string, releaseDate?: string | null): void {
   pendingAppUpdateVersion = version
   pendingAppUpdateDownloadUrl = downloadUrl
+  pendingAppUpdateReleaseDate = releaseDate ?? null
 }
 
 /**
@@ -1801,7 +2024,22 @@ async function checkForAppUpdateAndPrompt(): Promise<void> {
       console.log('[DSH] 客户端版本检查：已是最新版本')
       return
     }
-    rememberAppUpdate(result.latest.version, result.latest.downloadUrl)
+    rememberAppUpdate(result.latest.version, result.latest.downloadUrl, result.latest.releaseDate)
+    // 用户点过「跳过此版本」：不点亮标题栏按钮、不下载。等上游发布更高版本后
+    // 才会再次出现（更高版本不在跳过列表里）
+    if (isVersionSkipped('client', result.latest.version)) {
+      console.log(`[DSH] 客户端 v${result.latest.version} 已被用户跳过，不提示`)
+      return
+    }
+    // 用户勾了「以后自动下载并安装更新」：直接开始下载，不弹任何面板。
+    // 下载完成后的安装时机由 onClientUpdatePhaseChange 转成「下次启动时安装」。
+    // 注意：这里走的是本项目自己的检测 → 下载链路，electron-updater 的
+    // autoDownload / autoInstallOnAppQuit 仍保持 false（AGENTS.md §6.5）
+    if (loadUpdateSettings().autoUpdate) {
+      console.log(`[DSH] 已开启自动更新，开始下载客户端 v${result.latest.version}`)
+      void startAppUpdateDownload()
+      return
+    }
     markUpdateAvailable(result.latest.version)
   } catch (err) {
     console.error(`[DSH] 客户端版本检查失败: ${(err as Error).message}`)
@@ -2001,6 +2239,7 @@ app.whenReady().then(() => {
     () => ({ mainWindow, dshView }),
     () => {
       syncInjectedTheme()
+      syncDshWebTheme()
       reprojectNoticeBanner()
     }
   )
@@ -2028,6 +2267,9 @@ app.whenReady().then(() => {
   void startDshAndLoad()
   // 启动 DSH 更新定时轮询（每 6 小时，仅在打包环境生效）
   startPeriodicDshUpdateCheck()
+  // 启动客户端更新定时轮询（每 6 小时，仅在打包环境生效）。
+  // 没有它，「以后自动下载并安装更新」对运行期间才发布的新版本无效
+  startPeriodicAppUpdateCheck()
   // 公告定时轮询（每 6 小时，仅在打包环境生效）
   startPeriodicNoticeCheck()
 
@@ -2103,21 +2345,14 @@ ipcMain.handle('check-update', async () => {
 ipcMain.handle('get-app-version', async () => app.getVersion())
 
 // 获取应用图标 data URL（标题栏左侧图标显示用）
-// 读取 getWindowIconPath()（dev: build/icon.ico / 打包: resources/icon.ico），
-// nativeImage 缩放到 32x32 后转 PNG data URL（高 DPI 下 16 CSS px 实际渲染 32 物理像素）。
 // 走 data URL 规避两种环境的路径问题：dev 页面在 localhost 引用不到 build/ 目录、
 // 打包后页面在 asar 内而图标在 asar 外。失败返回空串（页面侧隐藏图标，不影响其他功能）。
+// 高 DPI 下 16 CSS px 实际渲染 32 物理像素，故取 32px。
 ipcMain.handle('get-app-icon', (event) => {
   if (!isTrustedSender(event)) {
     return ''
   }
-  try {
-    const icon = nativeImage.createFromPath(getWindowIconPath())
-    if (icon.isEmpty()) return ''
-    return icon.resize({ width: 32 }).toDataURL()
-  } catch {
-    return ''
-  }
+  return getAppIconDataUrl(32)
 })
 
 // ==================== DeepSeek 余额 ====================
@@ -2263,38 +2498,22 @@ ipcMain.on('titlebar-client-update', async (event) => {
 
   // ---- available：检测到新版，等用户点头才下载 251MB ----
   if (snap.phase === 'available') {
-    const r = await showDshMessageBox({
-      type: 'info',
-      title: '发现新版本',
-      message: `DSH Desktop 客户端 v${pendingAppUpdateVersion || snap.version || ''} 可更新`,
-      detail: `当前版本: v${getInstalledAppVersion()}\n\n点击「下载并更新」开始下载，下载期间 DSH 页面顶部会显示进度。`,
-      buttons: ['下载并更新', '取消'],
-      defaultId: 0,
-      cancelId: 1
-    })
-    if (r.response === 0) {
-      void startAppUpdateDownload()
-    }
+    const version = pendingAppUpdateVersion || snap.version || ''
+    const panel = await showUpdatePanel(clientAvailablePanelOptions(version))
+    handleClientAvailableResult(version, panel)
     return
   }
 
   // ---- downloading：进行中，用户可反悔取消 ----
   if (snap.phase === 'downloading') {
-    const r = await showDshMessageBox({
-      type: 'info',
+    const r = await showUpdatePanel(panelOptions(PANEL_CLIENT_DOWNLOADING, {
       title: '正在下载更新包',
+      version: `v${pendingAppUpdateVersion || snap.version || ''}`,
+      appIcon: getAppIconDataUrl(64),
       message: `DSH Desktop 客户端更新包下载中（${snap.percent}%）`,
       detail: '取消后已下载的部分会被删除，下次点「更新」将从头开始。',
-      detailTone: 'notice',
-      buttons: ['取消下载', '继续下载'],
-      // 默认焦点与 Esc 都给「继续下载」：误按回车或想关掉对话框
-      // 不应该丢掉已经下了一半的 251MB
-      defaultId: 1,
-      cancelId: 1,
-      // 视觉强调必须与 defaultId 一致：缺省推导认 cancelId=1，会把破坏性的
-      // 「取消下载」画成蓝色主按钮，误导用户点它
-      primaryId: 1
-    })
+      detailTone: 'notice'
+    }))
     if (r.response === 0) {
       cancelAppUpdateDownload()
       pushTitlebarUpdateState()
@@ -2303,17 +2522,16 @@ ipcMain.on('titlebar-client-update', async (event) => {
   }
 
   if (snap.phase === 'error') {
-    const r = await showDshMessageBox({
-      type: 'warning',
+    const r = await showUpdatePanel(panelOptions(PANEL_CLIENT_ERROR, {
       title: '更新未完成',
+      version: `v${pendingAppUpdateVersion || snap.version || ''}`,
+      appIcon: getAppIconDataUrl(64),
       message: 'DSH Desktop 客户端更新包下载失败',
       detail: `${snap.error || '未知原因'}\n\n可重试下载；若源站持续不可用，也可用浏览器直接下载安装包自行安装。`,
-      detailTone: 'notice',
-      buttons: ['重试下载', '浏览器下载', '取消'],
-      defaultId: 0,
-      cancelId: 2
-    })
-    if (r.response === 0) {
+      detailTone: 'notice'
+    }))
+    // 按钮下标：0 = 取消 / 1 = 浏览器下载 / 2 = 重试下载
+    if (r.response === 2) {
       void startAppUpdateDownload()
     } else if (r.response === 1) {
       await openAppUpdateInBrowser()
@@ -2330,12 +2548,12 @@ ipcMain.on('titlebar-client-update', async (event) => {
 /**
  * 标题栏：点击「更新DSH」按钮（DSH 运行包）
  *
- * 先弹确认框明示「从哪个版本到哪个版本」——运行包更新会停掉 DSH 服务、装 518 个包、
- * 再拉起来，属于会打断用户工作的操作，默认焦点给「取消」。
+ * 面板明示「从哪个版本到哪个版本」——运行包更新会停掉 DSH 服务、装 518 个包、
+ * 再拉起来，属于会打断用户工作的操作。
  *
- * 这是自绘对话框层（dsh-dialog）的样板调用点：defaultId 给「取消」是刻意的
- * 产品决策（回车不该直接触发一次打断会话的更新），而视觉强调仍在「确定更新」——
- * 两者在 showDshMessageBox 里是分开的 primaryId / defaultId。
+ * 键盘语义沿用迁移前的决策：defaultId 与 cancelId 都落在「稍后」上，
+ * 回车不该直接触发一次打断会话的更新；而视觉强调仍在「确定更新」。
+ * 两者在 update-panel.ts 的 PANEL_DSH_AVAILABLE 预设里是分开的字段。
  */
 ipcMain.on('titlebar-dsh-update', async (event) => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return
@@ -2343,20 +2561,9 @@ ipcMain.on('titlebar-dsh-update', async (event) => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (isUpdating) return
 
-  const r = await showDshMessageBox({
-    type: 'question',
-    title: '更新 DSH 运行包',
-    message: `DSH 运行包有更新 v${getInstalledDshVersion()} → v${pendingDshUpdateVersion}`,
-    detail: '更新过程中 DSH 服务会停止，下载并安装新运行包后自动重启。当前进行中的会话会中断。',
-    detailTone: 'notice',
-    buttons: ['确定更新', '取消'],
-    defaultId: 1,
-    cancelId: 1,
-    primaryId: 0
-  })
-  if (r.response === 0) {
-    await performUpdate()
-  }
+  const version = pendingDshUpdateVersion
+  const panel = await showUpdatePanel(dshAvailablePanelOptions(version, getInstalledDshVersion()))
+  handleDshAvailableResult(version, panel)
 })
 
 /**

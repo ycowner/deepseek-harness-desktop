@@ -37,6 +37,13 @@ export interface AppUpdateInfo {
   version: string
   /** 安装包直链（浏览器可直接下载，作为自动下载失败时的人工兜底） */
   downloadUrl: string
+  /**
+   * 发布日期（ISO-8601，如 '2026-10-13T15:41:28.667Z'）
+   *
+   * 来自 latest.yml 的顶层 releaseDate 字段——该字段一直都在，只是此前没解析。
+   * 解析不到时为 null，调用方据此整行不渲染日期（不编造日期）。
+   */
+  releaseDate: string | null
 }
 
 /**
@@ -131,16 +138,20 @@ function unquoteYamlScalar(value: string): string {
 }
 
 /**
- * 解析 latest.yml，取出顶层 version 与安装包文件名
+ * 解析 latest.yml，取出顶层 version、安装包文件名与发布日期
  *
  * 不引入 YAML 依赖：latest.yml 由 electron-builder 按固定结构生成（version / files[] /
  * path / sha512 / releaseDate），顶层键一律位于行首无缩进，按行正则解析足够且无依赖成本。
  * 解析不到 version 说明响应不是合法清单（例如源站返回了 HTML 错误页）——此时必须抛错，
  * 不能当作「无新版本」，否则会静默停止更新。
+ *
+ * releaseDate 是可选字段（格式异常的清单不该让整个更新检查失败），
+ * 解析不到时返回 null，调用方整行不渲染日期。
  */
-export function parseLatestYml(text: string): { version: string; fileName: string } {
+export function parseLatestYml(text: string): { version: string; fileName: string; releaseDate: string | null } {
   let version = ''
   let fileName = ''
+  let releaseDate: string | null = null
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/\r$/, '')
@@ -151,6 +162,7 @@ export function parseLatestYml(text: string): { version: string; fileName: strin
       const value = unquoteYamlScalar(topLevel[2])
       if (key === 'version' && value && !version) version = value
       else if (key === 'path' && value && !fileName) fileName = value
+      else if (key === 'releaseDate' && value && !releaseDate) releaseDate = value
       continue
     }
     // files[] 列表项里的 url（顶层 path 缺失时的兜底，缩进 2 或 4 空格皆可）
@@ -172,7 +184,11 @@ export function parseLatestYml(text: string): { version: string; fileName: strin
   if (!fileName) {
     throw new Error('更新清单解析失败：未找到安装包文件名')
   }
-  return { version, fileName }
+  // releaseDate 只用于展示，格式异常不值得让整个检查失败
+  if (releaseDate !== null && !/^\d{4}-\d{2}-\d{2}/.test(releaseDate)) {
+    releaseDate = null
+  }
+  return { version, fileName, releaseDate }
 }
 
 /**
@@ -182,9 +198,10 @@ export function parseLatestYml(text: string): { version: string; fileName: strin
  */
 export async function fetchLatestUpdateInfo(): Promise<AppUpdateInfo> {
   const text = await fetchText(`${UPDATE_FEED_URL}/${LATEST_YML}`)
-  const { version, fileName } = parseLatestYml(text)
+  const { version, fileName, releaseDate } = parseLatestYml(text)
   return {
     version,
+    releaseDate,
     // fileName 来自远端清单，拼接前做一次净化：只允许文件名本体，禁止任何路径分隔符或
     // 协议前缀，避免源站被篡改时把下载引到别处（isTrustedSender 之外的又一道防线）
     downloadUrl: `${UPDATE_FEED_URL}/${encodeURIComponent(fileName.replace(/^[a-z]+:\/\//i, '').replace(/[/\\]/g, ''))}`
