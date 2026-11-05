@@ -102,6 +102,9 @@ async function fetchText(url: string): Promise<string> {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   try {
     const res = await net.fetch(url, {
+      // 分发源未下发 Cache-Control，Chromium 会按启发式规则把 latest.yml 缓存
+      // 数小时到一天多，期间检测直接读旧清单、永远看不到新版本。必须显式绕过缓存。
+      cache: 'no-store',
       headers: {
         'User-Agent': 'DSH-Desktop-Updater/1.0.0',
         'Accept': 'text/yaml, text/plain, */*'

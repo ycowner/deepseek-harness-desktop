@@ -263,6 +263,9 @@ export async function fetchNotices(): Promise<Notice[]> {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   try {
     const res = await net.fetch(`${UPDATE_FEED_URL}/${NOTICES_FILE}`, {
+      // 与 latest.yml 同理：源站没有 Cache-Control，Chromium 的启发式缓存会让
+      // 6 小时轮询和「点铃铛刷新」都读到旧公告，必须显式绕过缓存。
+      cache: 'no-store',
       headers: { 'User-Agent': 'DSH-Desktop-Updater/1.0.0', Accept: 'application/json, text/plain, */*' },
       signal: controller.signal
     })

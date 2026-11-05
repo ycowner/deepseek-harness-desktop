@@ -204,6 +204,9 @@ export function configureAutoUpdater(): void {
   // app-update.ts 里的 UPDATE_FEED_URL 一个字符串、不必重新打包即可切到兜底源
   // （见 docs/AUTO-UPDATE-PLAN.md §4.4）。
   autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URL, channel: 'latest' })
+  // 下载阶段 electron-updater 会再拉一次 latest.yml；源站没有 Cache-Control 时
+  // Chromium 可能直接复用本地缓存里的旧清单，显式要求每次重新校验。
+  autoUpdater.requestHeaders = { 'Cache-Control': 'no-cache' }
   // 关闭 electron-updater 自带的自动下载：改由 index.ts 在判定确有新版本后显式调用
   // downloadAppUpdate()，理由见文件头注释第 1 条
   autoUpdater.autoDownload = false
