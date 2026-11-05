@@ -16,6 +16,11 @@
 - 可选**「以后自动下载并安装更新」**：勾选后检测到新版本自动下载，下次启动时静默安装；手动「检查更新…」始终弹面板、不自动下载。
 - 更新日志面板支持展示发布日期。
 
+## 🐛 修复：检查更新一直显示「已是最新」
+
+- 更新清单 `latest.yml` 与公告此前都没有绕过客户端 HTTP 缓存，源站也未下发 `Cache-Control`，Chromium 会按启发式规则缓存数小时到一天多；这段时间里「检查更新」一直在比对旧清单，看不到刚发布的新版本。
+- 现在更新清单与公告拉取都强制不走缓存，下载阶段也会要求重新校验清单。
+
 ## 🔧 其他
 
 - `settings.json` 统一由 `settings-store` 读写（主题 + 更新偏好）。
@@ -26,12 +31,12 @@
 | --- | --- |
 | `DSH-Desktop-Setup-1.0.20.exe` | Windows x64 安装程序，安装时需管理员授权 |
 
-**安装包校验值**（229,932,127 字节）：
+**安装包校验值**（229,932,517 字节）：
 
 | 算法 | 值 |
 | --- | --- |
-| SHA256 | `9bcc27c36237c4102a474e566495265fd4460ce4d719d06377d4d2fb2724417a` |
-| SHA512 (base64) | `hQhe4M5U61xpjpsrouaAyKoEu5RCUS2ZU7WgbTY7RTeGtt0MXaV1rAQUSxhIDeM8VGpXn2DCzssmfO8zo8wmdw==` |
+| SHA256 | `f6d756c041246faebcc478bd052cb74d3c9a9d29f6e005bb14886b443848a005` |
+| SHA512 (base64) | `FB6qFrqq2ATb/nwPBoj0V0VfH4lrNxm7EgWcmCY9dJXqzzqKIpMKsEOVz7PydtITms9JkdCKnHoKDFGZibWmHw==` |
 
 > 无接口、协议与存储格式变更，配置与数据完全兼容，建议直接覆盖升级。升级后首次启动会复用已解包的出厂组件；全新安装后首次启动会多约 9 秒的出厂组件解包等待（loading 页有状态提示），属正常现象。
 
